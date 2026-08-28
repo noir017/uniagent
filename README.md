@@ -241,3 +241,7 @@ sudo rm /home/ubuntu/apps/uniagent/home/.ssh/authorized_keys
 cd ~/apps/uniagent && docker compose up -d
 # 3. oraclea2 那边把 ssh/config 里的 uniagent-tp 改回 uniagent
 ```
+
+## License
+
+GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](LICENSE).
