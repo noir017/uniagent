@@ -1,0 +1,29 @@
+version: v3
+teleport:
+  nodename: uniagent-unraid
+  data_dir: /var/lib/teleport
+  join_params:
+    token_name: /root/join.token
+    method: token
+  proxy_server: teleport.lan.noharanas.eu.org:443
+  log:
+    output: stderr
+    severity: INFO
+    format:
+      output: text
+  ca_pin: sha256:bb2123da7b76f8d0de1a581e4c11602ecba239ac74817bb7fbf5c21930e7301a
+  diag_addr: ""
+auth_service:
+  enabled: "no"
+ssh_service:
+  enabled: "yes"
+  labels:
+    arch: amd64
+    env: dev
+    host: unraid
+    kind: container
+proxy_service:
+  enabled: "no"
+  https_keypairs: []
+  https_keypairs_reload_interval: 0s
+  acme: {}

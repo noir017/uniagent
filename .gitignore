@@ -1,0 +1,10 @@
+# 运行时数据，绝不入库（含密钥/身份/登录态）
+home/
+teleport/data/
+teleport/token
+ssh/keys/
+ssh/keys/*.pub
+*.log
+
+# 备份文件
+*.bak*

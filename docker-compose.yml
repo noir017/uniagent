@@ -1,0 +1,45 @@
+services:
+  uniagent:
+    build:
+      context: .
+      args:
+        UID: "1001"
+        GID: "1001"
+        NODE_MAJOR: "24"
+        TELEPORT_CHANNEL: stable/v18
+        TZ: Asia/Shanghai
+    image: uniagent:local
+    container_name: uniagent
+    hostname: uniagent-unraid
+    restart: unless-stopped
+    init: false
+    labels:                      # Unraid dashboard integration（compose 管理的栈）
+      net.unraid.docker.managed: "composeman"
+    # 不映射直连端口（2026-08-28 部署时用户确认）：unraid 在家内网，家里机器走
+    # Teleport 堡垒机（192.168.0.10）延迟 ~1ms，直连 sshd 无性能收益，反而多一个
+    # LAN 攻击面。容器内 sshd 照常运行（Dockerfile 第 9 层装的），哪天要直连，
+    # 在这里补 ports: ["192.168.0.185:22022:22"] 即可。
+    command: ["teleport","start","-c","/etc/teleport/teleport.yaml"]
+    environment:
+      - TZ=Asia/Shanghai
+      - USERNAME=user
+    volumes:
+      # user 家目录持久化到宿主机
+      - ./home:/home/user
+      # teleport agent 配置与状态（joining 后不丢 host UUID）
+      - ./teleport/config:/etc/teleport
+      - ./teleport/data:/var/lib/teleport
+      # 一次性 join token（1h TTL，join 成功后不再读）；放在备份目录内
+      - ./teleport/token:/root/join.token
+      # sshd 的加固配置（属主必须 root，否则 sshd 拒绝加载 include）
+      - ./ssh/sshd_config.d/10-direct.conf:/etc/ssh/sshd_config.d/10-direct.conf:ro
+      # sshd 主机密钥：可写，首次启动由 entrypoint 生成；持久化=重建镜像不换指纹
+      - ./ssh/keys:/etc/ssh/keys
+    working_dir: /home/user
+    # 家里 dnsmasq 泛解析 *.lan.noharanas.eu.org -> 192.168.0.10，这里显式钉住，
+    # 不依赖容器 DNS（与 oracle 版一致）
+    extra_hosts:
+      - "teleport.lan.noharanas.eu.org:192.168.0.10"
+    # 交互式工具（opencode / claude / codex / agy 的 TUI）需要 tty
+    stdin_open: true
+    tty: true

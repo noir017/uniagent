@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# uniagent —— 从 oracle 宿主机进入 uniagent 容器
+#
+# 为什么不直接用仓库里的 ./ua：
+#   1. ./ua 依赖 cwd，必须先 cd ~/apps/uniagent；
+#   2. 名字 `ua` 在本机被占用 —— /usr/bin/ua 是 ubuntu-advantage(Ubuntu Pro) 的软链，
+#      去掉 ./ 前缀就会跑到那个去。所以这里换名叫 uniagent，装在 /usr/local/bin
+#      （PATH 里排在 /usr/bin 之前，且不与任何 apt 包重名）。
+#
+# 用法：
+#   uniagent                 交互式登录 shell（容器内用户 user）
+#   uniagent claude          直接跑命令；无 TTY 时自动降级，可用于脚本/管道
+#   uniagent pi -p "..."     同上，参数原样传递
+#   uniagent bash -c "a; b"  复合命令要显式套 bash -c —— 参数是逐个转义传给
+#                            docker exec 的（不是 ssh 那种拼成字符串），所以
+#                            `uniagent "a; b"` 会把整串当成一个命令名。
+#   uniagent --root          以 root 进入（装包用；user 本身也有免密 sudo）
+#   uniagent --workspace     直接落到 ~/workspace
+#   uniagent --status        只看容器状态，不进入
+set -euo pipefail
+
+APP_DIR=/mnt/cache/appdata/uniagent
+CONTAINER=uniagent
+CT_USER=user
+WORKDIR=/home/user
+
+die() { printf '%s\n' "uniagent: $*" >&2; exit 1; }
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --root)      CT_USER=root; shift ;;
+        --workspace) WORKDIR=/home/user/workspace; shift ;;
+        --status)
+            docker ps -a --filter "name=^/${CONTAINER}$" \
+                --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}'
+            exit 0 ;;
+        -h|--help)   awk 'NR>1{if($0 !~ /^#/) exit; sub(/^# ?/,""); print}' "$0"; exit 0 ;;
+        --)          shift; break ;;
+        *)           break ;;
+    esac
+done
+
+command -v docker >/dev/null || die "找不到 docker"
+
+# 容器不存在 -> 让用户自己决定是否 build，不擅自动镜像
+if ! docker inspect "${CONTAINER}" >/dev/null 2>&1; then
+    die "容器 ${CONTAINER} 不存在。先跑：cd ${APP_DIR} && docker compose up -d"
+fi
+
+# 停着就拉起来。用 compose 而不是 docker start，保证端口/挂载/extra_hosts
+# 与 docker-compose.yml 一致（手工 docker start 会沿用旧配置）。
+state="$(docker inspect -f '{{.State.Status}}' "${CONTAINER}")"
+if [ "${state}" != "running" ]; then
+    printf '%s\n' "uniagent: 容器当前 ${state}，正在启动…" >&2
+    (cd "${APP_DIR}" && docker compose up -d) >&2 \
+        || die "启动失败，看 cd ${APP_DIR} && docker compose logs"
+    # teleport 是主进程，起来要几秒；等到 running 再 exec，否则 exec 会报 not running
+    for _ in $(seq 1 30); do
+        [ "$(docker inspect -f '{{.State.Status}}' "${CONTAINER}")" = running ] && break
+        sleep 0.5
+    done
+    [ "$(docker inspect -f '{{.State.Status}}' "${CONTAINER}")" = running ] \
+        || die "等了 15s 容器仍未 running"
+fi
+
+# 只有 stdin 和 stdout 都是 TTY 才要 -t；否则 docker exec 会报
+# "the input device is not a TTY"，管道和 ssh 非交互执行就废了。
+FLAGS=(-i)
+if [ -t 0 ] && [ -t 1 ]; then FLAGS=(-i -t); fi
+
+if [ "$#" -eq 0 ]; then
+    exec docker exec "${FLAGS[@]}" -u "${CT_USER}" -w "${WORKDIR}" "${CONTAINER}" bash -l
+else
+    # bash -lc 走登录 shell，才能拿到 /etc/profile.d/10-uniagent.sh 里的 PATH；
+    # %q 逐个转义，带空格/引号的参数不会被二次拆分。
+    exec docker exec "${FLAGS[@]}" -u "${CT_USER}" -w "${WORKDIR}" "${CONTAINER}" \
+        bash -lc "$(printf '%q ' "$@")"
+fi
