@@ -60,6 +60,24 @@ RUN set -eux; \
         | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh; \
     uv --version; uvx --version
 
+# ---------- 4b. Go (官方 tarball，Debian 源里的 1.19 太老) ----------
+# 装到 /usr/local/go，不落在 $HOME，不会被 /home/user 的 bind mount 遮蔽。
+# 升级 Go 只需改 GO_VERSION 并重建：单独一层，只重建这一层。
+ARG GO_VERSION=1.27.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) goarch=amd64 ;; \
+        arm64) goarch=arm64 ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${goarch}.tar.gz" -o /tmp/go.tgz; \
+    tar -C /usr/local -xzf /tmp/go.tgz; \
+    rm /tmp/go.tgz; \
+    ln -sf /usr/local/go/bin/go /usr/local/bin/go; \
+    ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
+    go version
+
 # ---------- 5. AI CLI（npm 全局，落在 /usr/lib/node_modules）----------
 RUN set -eux; \
     npm install -g \
@@ -121,24 +139,6 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     mkdir -p /run/sshd /etc/ssh/keys; \
     rm -f /etc/ssh/ssh_host_*
-
-# ---------- 10. pi coding agent (earendil-works) ----------
-# 刻意单独放在最后一层，而不是并进第 5 段的 npm 全局安装：pi 版本迭代很快
-# （发布节奏是每天数次），并进第 5 段会让后面 5 层（user/agy/骨架/sshd）每次
-# 升级都跟着重建。单独一层则只重建这 13 秒。
-#
-# 不需要 --allow-scripts：pi 自身没有 install 脚本，被 npm 12 拦掉的两个依赖
-# 脚本都是空操作 —— @google/genai 的 preinstall 是 `echo`，protobufjs 的
-# postinstall 只往 stderr 打依赖版本兼容警告，都不做构建。用 --ignore-scripts
-# 显式声明这一点，避免以后有人看到 npm warn 以为漏装了东西。
-#
-# 注意：pi 装在 /usr/lib/node_modules（root 属主），所以 `pi update self`
-# 要用 `sudo npm i -g @earendil-works/pi-coding-agent`（user 有 NOPASSWD sudo）。
-# 没像 agy 那样 chown 给 user —— 那会把整个全局 node_modules 的属主搞乱。
-RUN set -eux; \
-    npm install -g --ignore-scripts @earendil-works/pi-coding-agent; \
-    npm cache clean --force; \
-    pi --version
 
 COPY entrypoint.sh /usr/local/sbin/entrypoint.sh
 RUN chmod +x /usr/local/sbin/entrypoint.sh

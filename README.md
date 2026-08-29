@@ -20,17 +20,14 @@
 | opencode | `opencode` | npm `opencode-ai` |
 | Claude Code | `claude` | npm `@anthropic-ai/claude-code` |
 | Codex CLI | `codex` | npm `@openai/codex` |
-| pi | `pi` | npm `@earendil-works/pi-coding-agent`（[earendil-works/pi](https://github.com/earendil-works/pi)），单独一层安装便于频繁升级 |
 | Antigravity CLI | `agy` | 官方安装脚本，装在 `/usr/local/bin`，属主 `user`（便于自更新） |
+| Go | `/usr/local/go/bin/go` | 官方 tarball（`GO_VERSION` ARG，当前 1.27.0），`go`/`gofmt` 已软链进 `/usr/local/bin` |
 | uv / uvx | `/usr/local/bin/uv` | Astral 官方脚本 |
 | Teleport agent | `teleport` | apt 源 `stable/v18`，**钉 18.10.0**（不能比集群 auth 新），默认不启动 |
 | 其他 | git、python3、build-essential、jq、ripgrep、fd、tmux、htop… | |
 
 > 所有工具都装在 `/usr/local` 或 `/usr` 下，**不在 `$HOME`**，因此不会被 `/home/user` 的
 > bind mount 遮蔽。
-
-> `pi` 装在 `/usr/lib/node_modules`（root 属主），`pi update self` 会因无写权限失败；
-> 升级用 `sudo npm i -g @earendil-works/pi-coding-agent`，或直接改 Dockerfile 重建第 10 层。
 
 ## 目录映射
 
@@ -56,7 +53,7 @@ docker compose down              # 停止
 
 ```bash
 uniagent                    # 交互式登录 shell（不依赖 cwd，容器停着会自动拉起）
-uniagent pi                 # 直接跑容器内的 CLI
+uniagent claude             # 直接跑容器内的 CLI
 uniagent bash -c "a; b"     # 复合命令（参数是逐个转义传给 docker exec 的，不是拼字符串）
 uniagent --status           # 只看容器状态
 uniagent --root             # 以 root 进入
@@ -76,7 +73,7 @@ uniagent --workspace        # 落到 ~/workspace
 ~13s 才重新注册。包装脚本走 docker exec，冷容器到拿到 shell 实测 1.2s。
 热连两条路差 170ms（直连 690ms / 包装 861ms），确定容器在跑时可以直接 `ssh uniagent`。
 
-各 CLI 首次使用需自行登录（`claude`、`codex login`、`opencode auth login`、`agy`、`pi auth`），
+各 CLI 首次使用需自行登录（`claude`、`codex login`、`opencode auth login`、`agy`），
 凭据写在 `/home/user` 下，已持久化。SSH 会话里 `agy` 会打印授权 URL，在本地浏览器打开即可。
 
 ## 网络：怎么够到家里的堡垒机
