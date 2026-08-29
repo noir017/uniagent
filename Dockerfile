@@ -143,6 +143,19 @@ RUN set -eux; \
 COPY entrypoint.sh /usr/local/sbin/entrypoint.sh
 RUN chmod +x /usr/local/sbin/entrypoint.sh
 
+# ---------- 10. GitHub CLI (gh) ----------
+# 单独最后一层：升级/重装 gh 只重建这一层，前面全部走缓存。
+# 认证数据落在 /home/user/.config/gh/（bind mount），重建不丢。
+RUN set -eux; \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /usr/share/keyrings/githubcli-archive-keyring.gpg; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gh; \
+    rm -rf /var/lib/apt/lists/*; \
+    gh --version
+
 WORKDIR /home/user
 ENTRYPOINT ["/usr/bin/tini","--","/usr/local/sbin/entrypoint.sh"]
 CMD ["sleep","infinity"]
