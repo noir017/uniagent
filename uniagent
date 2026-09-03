@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uniagent —— 从 oracle 宿主机进入 uniagent 容器
+# uniagent —— 从宿主机进入 uniagent 容器，以及把容器更新到最新镜像
 #
 # 为什么不直接用仓库里的 ./ua：
 #   1. ./ua 依赖 cwd，必须先 cd ~/apps/uniagent；
@@ -17,6 +17,8 @@
 #   uniagent --root          以 root 进入（装包用；user 本身也有免密 sudo）
 #   uniagent --workspace     直接落到 ~/workspace
 #   uniagent --status        只看容器状态，不进入
+#   uniagent update          拉 GHCR 上的新镜像并重建容器（--dry-run 只看会不会动，
+#                            --force 无视容器内还开着的 tmux 会话）
 set -euo pipefail
 
 APP_DIR=/mnt/cache/appdata/uniagent
@@ -25,6 +27,110 @@ CT_USER=user
 WORKDIR=/home/user
 
 die() { printf '%s\n' "uniagent: $*" >&2; exit 1; }
+_short() { local id="${1#sha256:}"; printf '%s' "${id:0:12}"; }
+
+# ---- update：拉新镜像并重建容器 ----
+# 这是更新链路的最后一棒，前两棒在 GitHub 上：agent-anywhere 发 Release →
+# uniagent 的 bump-agent-anywhere.yml 改 Dockerfile 的 ARG 并复用 docker.yml 把镜像
+# 推到 GHCR。这里只负责把新镜像换上来。
+#
+# 刻意没做成定时自动拉：换镜像 = 重建容器 = 容器内所有 tmux 会话连同里面跑着的
+# coding agent 一起没。什么时候能中断，只有人知道。
+do_update() {
+    local force=0 dry=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --force)   force=1; shift ;;
+            --dry-run) dry=1;   shift ;;
+            *) die "update: 不认识的参数 $1（只有 --force / --dry-run）" ;;
+        esac
+    done
+
+    [ -f "${APP_DIR}/docker-compose.yml" ] || die "找不到 ${APP_DIR}/docker-compose.yml"
+
+    # 镜像引用从 compose 里读而不是写死：哪天把 latest 换成 sha-xxxxxxx 钉版本，
+    # 这里跟着变，不会出现"脚本拉 A、compose 起 B"。
+    local ref
+    ref="$(sed -n 's/^[[:space:]]*image:[[:space:]]*//p' "${APP_DIR}/docker-compose.yml" | head -1)"
+    [ -n "$ref" ] || die "从 docker-compose.yml 里读不到 image:"
+
+    # 比镜像 ID，不比 tag：latest 是会动的，tag 没变不代表镜像没变。
+    local before=""
+    if docker inspect "${CONTAINER}" >/dev/null 2>&1; then
+        before="$(docker inspect -f '{{.Image}}' "${CONTAINER}")"
+    fi
+
+    printf '%s\n' "uniagent: docker compose pull ${ref} …" >&2
+    (cd "${APP_DIR}" && docker compose pull) >&2 || die "pull 失败"
+
+    local after
+    after="$(docker image inspect "${ref}" -f '{{.Id}}' 2>/dev/null)" \
+        || die "拉完却 inspect 不到 ${ref}"
+
+    if [ "${before}" = "${after}" ]; then
+        printf '%s\n' "uniagent: 已经是最新（$(_short "${after}")），容器不动" >&2
+        return 0
+    fi
+    printf '%s\n' "uniagent: 镜像 $(_short "${before:-none}") → $(_short "${after}")" >&2
+
+    # 容器里的 tmux 会话会随重建一起没。agent-anywhere 的守护会话不算——entrypoint
+    # 会重新拉起它；除它以外还有会话，通常就意味着有人在里面跑着东西。
+    local sessions=""
+    if [ -n "${before}" ] && [ "$(docker inspect -f '{{.State.Status}}' "${CONTAINER}")" = running ]; then
+        sessions="$(docker exec -u "${CT_USER}" "${CONTAINER}" bash -lc 'tmux ls 2>/dev/null' \
+            | grep -v '^agent-anywhere-daemon:' || true)"
+    fi
+    if [ -n "${sessions}" ]; then
+        printf '%s\n' "uniagent: 容器内还开着 tmux 会话，重建会把它们连同里面的任务一起杀掉：" >&2
+        printf '%s\n' "${sessions}" | sed 's/^/    /' >&2
+        [ "${force}" -eq 1 ] || die "确认可以中断就加 --force"
+    fi
+
+    if [ "${dry}" -eq 1 ]; then
+        printf '%s\n' "uniagent: --dry-run，到此为止（镜像已经在本地了，下次 update 直接换）" >&2
+        return 0
+    fi
+
+    (cd "${APP_DIR}" && docker compose up -d) >&2 \
+        || die "up -d 失败，看 cd ${APP_DIR} && docker compose logs"
+
+    for _ in $(seq 1 30); do
+        [ "$(docker inspect -f '{{.State.Status}}' "${CONTAINER}" 2>/dev/null)" = running ] && break
+        sleep 0.5
+    done
+    [ "$(docker inspect -f '{{.State.Status}}' "${CONTAINER}" 2>/dev/null)" = running ] \
+        || die "等了 15s 容器仍未 running"
+
+    # 验收 agent-anywhere 的版本只能读已装包的 package.json：
+    # `agent-anywhere --version` 打印的是源码里硬编码的字符串（一直是 0.2.0），
+    # 拿它断言会永远"通过"。
+    local aa
+    aa="$(docker exec -u "${CT_USER}" "${CONTAINER}" \
+        node -p "require('/usr/lib/node_modules/agent-anywhere-cli/package.json').version" 2>/dev/null)" \
+        || aa="读不到"
+    printf '%s\n' "uniagent: agent-anywhere ${aa}" >&2
+
+    # 守护进程由 entrypoint 拉起，给它几秒再问状态
+    local st=""
+    for _ in $(seq 1 10); do
+        st="$(docker exec -u "${CT_USER}" "${CONTAINER}" \
+            bash -lc '/usr/local/bin/agent-anywhere-daemon.sh status' 2>/dev/null || true)"
+        case "${st}" in *"process: UP"*) break ;; esac
+        sleep 1
+    done
+    printf '%s\n' "${st:-（拿不到 daemon 状态）}" | sed 's/^/    /' >&2
+
+    # teleport agent 重新注册要十几秒，这段时间 `ssh uniagent-unraid` 会静默挂住
+    # （不报"节点不存在"，就是不出声），别误判成网络故障。
+    printf '%s\n' "uniagent: 完成。teleport agent 重新注册约 15s，其间 ssh uniagent-unraid 会挂住" >&2
+}
+
+if [ "${1:-}" = update ]; then
+    shift
+    command -v docker >/dev/null || die "找不到 docker"
+    do_update "$@"
+    exit 0
+fi
 
 while [ "$#" -gt 0 ]; do
     case "$1" in

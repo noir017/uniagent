@@ -142,6 +142,17 @@ agent 版本需 ≤ 集群 auth 版本；集群是 v18 时保持 `TELEPORT_CHANN
 镜像由 CI 编译发布到 GHCR（`.github/workflows/docker.yml`，amd64 + arm64），**部署侧不 build**：
 
 ```bash
+uniagent update              # 拉新镜像并重建；--dry-run 只拉不换，--force 无视占用
+```
+
+`update` 比手敲两条命令多做的事，都是踩过才加的：镜像引用从 compose 里读（不写死，钉版本时
+跟着变）；比**镜像 ID** 而不是 tag（`latest` 会动，tag 没变不代表镜像没变），没变就一步不走；
+重建前列出容器内除守护会话以外的 tmux 会话并拒绝执行，因为重建会把里面跑着的 coding agent
+一起杀掉；重建后报 agent-anywhere 的**真实**版本（读已装包的 package.json，见下）和守护状态。
+
+手动等价物，没有上面这些检查：
+
+```bash
 cd ~/apps/uniagent
 docker compose pull && docker compose up -d
 ```
@@ -180,10 +191,18 @@ tail -f ~/.config/agent-anywhere/daemon.log           # 日志
 tmux attach -t agent-anywhere-daemon                  # 贴现场
 ```
 
-**升级**：到 agent-anywhere 仓库发一个新 Release（Actions 里跑完 typecheck/lint/test/build
-后 `npm pack` 产出 tarball），把 Dockerfile 里 `AGENT_ANYWHERE_VERSION` 与
-`AGENT_ANYWHERE_SHA256`（取 Release 的 `SHA256SUMS`）改掉，推 main，然后 pull。
-这一层是 Dockerfile 的最后一层，改它不会让前面的 Node / 各 AI CLI 缓存失效。
+**升级**：镜像侧是自动的。agent-anywhere 仓库发出新 Release 之后，
+`.github/workflows/bump-agent-anywhere.yml`（每天一次，也可在 Actions 页手动 Run workflow）
+会查到它、从 Release 自带的 `SHA256SUMS` 取校验和、改掉 Dockerfile 里
+`AGENT_ANYWHERE_VERSION` 与 `AGENT_ANYWHERE_SHA256` 两个 ARG 并提交，然后复用 docker.yml
+把镜像推到 GHCR。这一层是 Dockerfile 的最后一层，改它不会让前面的 Node / 各 AI CLI 缓存失效。
+
+**机器侧不自动**：镜像出来之后仍然要自己 `uniagent update`（见「重建」）。重建会杀掉容器里
+正在跑的东西，那个时机不该由定时任务替人决定。
+
+要钉某个版本（回退，或抢在定时之前升）：Actions → Bump agent-anywhere → Run workflow，
+填版本号。定时那条路**只升不降**（Release 被撤回时不会把线上悄悄退回去）；填了版本号的
+手动那条路可以降。直接手改两个 ARG 再推 main 当然也照样有效，自动流程只是省掉抄校验和。
 
 > ⚠️ `agent-anywhere --version` 打印的是 cli.ts 里硬编码的字符串（当前恒为 `0.2.0`），
 > **不是**真实版本。要看真实版本：
