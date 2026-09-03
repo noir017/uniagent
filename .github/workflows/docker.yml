@@ -32,6 +32,7 @@ on:
       - 'docker-compose.yml'
       - 'ssh/**'
       - 'teleport/**'
+      - '.github/workflows/bump-agent-anywhere.yml'
   workflow_dispatch:
   # 供 bump-agent-anywhere.yml 用 `jobs.<id>.uses` 复用。
   #
