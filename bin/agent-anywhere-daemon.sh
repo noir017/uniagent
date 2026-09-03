@@ -90,6 +90,14 @@ case "${1:-}" in
             exit 1
         fi
         mkdir -p "$APP_DIR"
+        # Unix sockets bind by pathname: an existing FILE makes bind() fail with
+        # EADDRINUSE even when nobody is listening. The socket lives in the bind
+        # mount, so a container rebuild always leaves the previous one behind and
+        # every boot logged `[ipc] server error: listen EADDRINUSE`. The daemon
+        # recovers on its own, but a "server error" on every single startup is
+        # exactly the kind of noise that sends someone debugging a healthy IPC.
+        # Safe here: both checks above already established no daemon is running.
+        rm -f "$APP_DIR/daemon.sock"
         tmux new-session -d -s "$DAEMON_SESSION" "bash $SELF _supervise"
         echo "started (tmux session $DAEMON_SESSION); logs: $LOG"
         ;;
