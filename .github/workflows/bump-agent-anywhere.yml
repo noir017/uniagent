@@ -1,0 +1,131 @@
+# 把 Dockerfile 里钉的 agent-anywhere 版本追到 agent-anywhere 仓库的最新 Release，
+# 然后直接调 docker.yml 把镜像编出来推到 GHCR。
+#
+# 手动做是四步：翻 Release 拿版本号 → 从 SHA256SUMS 抄校验和 → 改 Dockerfile 的两个
+# ARG → push main 等 CI。这个 workflow 就是这四步。
+#
+# 它只做到 GHCR 为止，**不碰任何机器**。目标机仍然要自己跑 `uniagent update`
+# （仓库根的 uniagent 脚本）—— 更新等于重建容器，会杀掉容器里正在跑的 coding agent
+# 会话，那个时机只能由人来定。
+#
+# 触发：每天一次；也可以在 Actions 页手动 Run workflow 并指定版本（降级/回退用这条）。
+# 注意 GitHub 会在仓库连续 60 天没有提交后自动停用 schedule 触发。
+
+name: Bump agent-anywhere
+
+on:
+  schedule:
+    - cron: '23 21 * * *' # 每天 05:23 CST（UTC+8）
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '目标 agent-anywhere 版本，如 0.5.0（留空 = 用最新 Release）'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-agent-anywhere
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump Dockerfile
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # 要往 main 提交
+    outputs:
+      changed: ${{ steps.bump.outputs.changed }}
+      version: ${{ steps.bump.outputs.version }}
+      sha: ${{ steps.bump.outputs.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve version, rewrite ARGs, commit
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPO: noir017/agent-anywhere
+          WANT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          want="${WANT#v}"
+          if [ -z "$want" ]; then
+            # gh release view 不带 tag = API 的 latest，草稿和 prerelease 不算在内。
+            want="$(gh release view --repo "$SOURCE_REPO" --json tagName -q .tagName)"
+            want="${want#v}"
+          fi
+          [ -n "$want" ] || { echo "::error::拿不到目标版本"; exit 1; }
+
+          cur="$(sed -n 's/^ARG AGENT_ANYWHERE_VERSION=//p' Dockerfile)"
+          [ -n "$cur" ] || { echo "::error::Dockerfile 里没有 ARG AGENT_ANYWHERE_VERSION"; exit 1; }
+          echo "当前 $cur → 目标 $want"
+
+          if [ "$want" = "$cur" ]; then
+            echo "已经是 $cur，无事可做"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 定时跑的那条路不做降级：Release 被撤回、或者有人手工钉了个更新的版本时，
+          # 自动流程不应该把线上悄悄退回去。要降版就手动 Run workflow 填版本号。
+          if [ -z "$WANT" ] && [ "$(printf '%s\n%s\n' "$cur" "$want" | sort -V | tail -1)" != "$want" ]; then
+            echo "最新 Release ($want) 比当前钉的 ($cur) 旧，自动流程不降级"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 校验和取 Release 自带的 SHA256SUMS（release.yml 里 npm pack 之后算的），
+          # 不是下载 tarball 后现算 —— 现算的话，下载环节被掉包一样能"对得上"。
+          curl -fsSL -o /tmp/SHA256SUMS \
+            "https://github.com/$SOURCE_REPO/releases/download/v$want/SHA256SUMS"
+          # 行形如：<64位sha>  ./agent-anywhere-cli-0.5.0.tgz
+          sha="$(awk -v f="./agent-anywhere-cli-$want.tgz" '$2 == f { print $1 }' /tmp/SHA256SUMS)"
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::error::SHA256SUMS 里没有 agent-anywhere-cli-$want.tgz 的条目"
+            cat /tmp/SHA256SUMS
+            exit 1
+          fi
+
+          sed -i \
+            -e "s/^ARG AGENT_ANYWHERE_VERSION=.*/ARG AGENT_ANYWHERE_VERSION=$want/" \
+            -e "s/^ARG AGENT_ANYWHERE_SHA256=.*/ARG AGENT_ANYWHERE_SHA256=$sha/" \
+            Dockerfile
+
+          # sed 匹配不上是不报错的，所以逐条断言写进去了
+          grep -qx "ARG AGENT_ANYWHERE_VERSION=$want" Dockerfile
+          grep -qx "ARG AGENT_ANYWHERE_SHA256=$sha" Dockerfile
+          if git diff --quiet -- Dockerfile; then
+            echo "::error::两个 ARG 都断言通过，但 Dockerfile 没有变化"
+            exit 1
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "chore(agent-anywhere): $want" -- Dockerfile
+          git push
+
+          {
+            echo "changed=true"
+            echo "version=$want"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+          echo "agent-anywhere \`$cur\` → \`$want\`" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Image
+    needs: bump
+    if: needs.bump.outputs.changed == 'true'
+    permissions:
+      contents: read
+      packages: write
+    # 复用 docker.yml，并把刚提交的 commit 显式传下去：调用方是 schedule /
+    # workflow_dispatch 事件，被调用方默认 checkout 的 github.sha 是**运行开始那一刻**
+    # 的 main HEAD，也就是升级之前的状态。
+    uses: ./.github/workflows/docker.yml
+    with:
+      ref: ${{ needs.bump.outputs.sha }}

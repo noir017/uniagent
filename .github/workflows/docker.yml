@@ -25,10 +25,33 @@ on:
       - 'README.md'
       - 'LICENSE'
       - '.gitignore'
+      # 宿主侧的文件（上面那段列的那些）：只有 Dockerfile / entrypoint.sh / bin/
+      # 会进镜像，改这些等两架构重编一遍纯属白等。
+      - 'uniagent'
+      - 'ua'
+      - 'docker-compose.yml'
+      - 'ssh/**'
+      - 'teleport/**'
   workflow_dispatch:
+  # 供 bump-agent-anywhere.yml 用 `jobs.<id>.uses` 复用。
+  #
+  # 为什么不让 bump 那边推 main、靠上面的 push 触发：**用 GITHUB_TOKEN 推出去的
+  # commit 不会再触发任何 workflow**（GitHub 为防死循环的明文限制）。bump 推完就
+  # 没人构建了，看起来"成功"但 GHCR 上什么都没变。走 workflow_call 则全程只用
+  # GITHUB_TOKEN，不必为了触发而引入 PAT 或 deploy key。
+  workflow_call:
+    inputs:
+      ref:
+        description: '要构建的 commit（留空 = 触发本次运行的那个）'
+        required: false
+        type: string
+        default: ''
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # 字面量 docker- 而不是 ${{ github.workflow }}：被 workflow_call 复用时
+  # github.workflow 是**调用方**的名字（Bump agent-anywhere），分组就和 push 触发
+  # 的那次不一样，两条路会并发去抢同一个 latest tag。钉死字面量让它们共用一个组。
+  group: docker-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -41,6 +64,10 @@ jobs:
   build:
     name: Build (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    outputs:
+      # 矩阵里两个 job 都会写这个 output，后完成的覆盖先完成的 —— 两边算出来的值
+      # 完全相同（同一个 ref 的 HEAD），所以覆盖无所谓。
+      short_sha: ${{ steps.built.outputs.short_sha }}
     permissions:
       contents: read
       packages: write
@@ -59,6 +86,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # 被复用时必须显式收 ref。调用方是 schedule / workflow_dispatch 事件，
+          # 它的 github.sha 是**运行开始那一刻**的 main HEAD —— 也就是 bump 那个
+          # commit 之前的状态，用默认值 checkout 会构建出一个"没升级"的镜像，
+          # 而且全程绿灯。
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Resolve built commit
+        id: built
+        run: echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Image name
         run: echo "IMAGE=${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
@@ -141,10 +178,17 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
+          # 三个 tag 全用 raw 显式给值，不用 {{is_default_branch}} / type=ref /
+          # type=sha 那套按事件类型推断的写法：
+          #   - 推断规则在 push 之外的事件（schedule、workflow_dispatch、
+          #     workflow_call）下行为不好断言，而 latest 一旦没打上，部署侧
+          #     `docker compose pull` 就悄悄拉不到新镜像 —— 全绿的静默失败。
+          #   - type=sha 用的是 github.sha（触发运行的 commit）。被复用时那不是
+          #     真正构建的 commit，tag 会指向错的版本。
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=sha
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=sha-${{ needs.build.outputs.short_sha }}
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
