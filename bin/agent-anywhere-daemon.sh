@@ -103,6 +103,13 @@ case "${1:-}" in
         # orphan them. They hold no token, but they do hold API sessions.
         pkill -f "claude-agent-acp" 2>/dev/null && echo "killed orphan claude agent" || true
         pkill -f "opencode acp" 2>/dev/null && echo "killed orphan opencode agent" || true
+        # Killing the ACP wrapper does NOT take its own child with it: the
+        # claude-agent-sdk binary keeps running (observed surviving a clean stop,
+        # ~170MB and a live API session each). Matched by its path INSIDE the
+        # gateway's dependency tree, so this can never hit the interactive
+        # `claude` CLI — that one is /usr/lib/node_modules/@anthropic-ai/claude-code.
+        pkill -f "agent-anywhere-cli/node_modules/@anthropic-ai/claude-agent-sdk" 2>/dev/null \
+            && echo "killed orphan claude-agent-sdk process" || true
         ;;
     status)
         if tmux has-session -t "$DAEMON_SESSION" 2>/dev/null; then
