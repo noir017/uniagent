@@ -1,0 +1,9 @@
+# 这个仓库常从 Windows 上编辑，而 *.sh / Dockerfile / entrypoint 都会被 COPY 进
+# Linux 镜像执行。带 CRLF 的 shebang 会让容器起不来，报的还是
+# `/usr/bin/env: 'bash\r': No such file or directory` 这种难认的错。
+# 这里把行尾钉死成 LF，不依赖各人的 core.autocrlf 设置。
+* text=auto eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+entrypoint.sh text eol=lf
+*.png binary

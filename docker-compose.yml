@@ -1,20 +1,18 @@
 services:
   uniagent:
-    build:
-      context: .
-      args:
-        UID: "1001"
-        GID: "1001"
-        NODE_MAJOR: "24"
-        TELEPORT_CHANNEL: stable/v18
-        TZ: Asia/Shanghai
-    image: uniagent:local
+    # 镜像由 CI 编译发布（.github/workflows/docker.yml），本地不 build：
+    # 这个镜像单架构就要十几分钟，unraid 现编译纯属浪费，而且两台机器编出来的
+    # 东西没法保证一致。更新流程：改 Dockerfile → push main → 等 CI → 这里
+    # docker compose pull && docker compose up -d。
+    # 要钉死某次提交就把 latest 换成 sha-<短 sha>。
+    image: ghcr.io/noir017/uniagent:latest
     container_name: uniagent
     hostname: uniagent-unraid
-    restart: unless-stopped
+    restart: always
     init: false
     labels:                      # Unraid dashboard integration（compose 管理的栈）
       net.unraid.docker.managed: "composeman"
+      net.unraid.docker.icon: "http://192.168.0.185:50560/icons/upload/uniagent.png"
     # 不映射直连端口（2026-08-28 部署时用户确认）：unraid 在家内网，家里机器走
     # Teleport 堡垒机（192.168.0.10）延迟 ~1ms，直连 sshd 无性能收益，反而多一个
     # LAN 攻击面。容器内 sshd 照常运行（Dockerfile 第 9 层装的），哪天要直连，
@@ -24,7 +22,9 @@ services:
       - TZ=Asia/Shanghai
       - USERNAME=user
     volumes:
-      # user 家目录持久化到宿主机
+      # user 家目录持久化到宿主机。agent-anywhere 的配置与状态也在这里
+      # （home/.config/agent-anywhere/：config.yaml、.env、conversations.json、
+      # daemon.log），刻意不进镜像 —— 镜像里只有程序，token 与会话归宿主机。
       - ./home:/home/user
       # teleport agent 配置与状态（joining 后不丢 host UUID）
       - ./teleport/config:/etc/teleport

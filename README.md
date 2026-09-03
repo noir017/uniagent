@@ -24,6 +24,7 @@
 | Go | `/usr/local/go/bin/go` | 官方 tarball（`GO_VERSION` ARG，当前 1.27.0），`go`/`gofmt` 已软链进 `/usr/local/bin` |
 | uv / uvx | `/usr/local/bin/uv` | Astral 官方脚本 |
 | Teleport agent | `teleport` | apt 源 `stable/v18`，**钉 18.10.0**（不能比集群 auth 新），默认不启动 |
+| agent-anywhere | `agent-anywhere` | IM 网关（Telegram ↔ claude/opencode/…）。版本由 Dockerfile 的 `AGENT_ANYWHERE_VERSION` 钉死（当前 0.4.0），装的是 GitHub Release 的 tarball 并校验 SHA256。见「IM 网关」一节 |
 | 其他 | git、python3、build-essential、jq、ripgrep、fd、tmux、htop… | |
 
 > 所有工具都装在 `/usr/local` 或 `/usr` 下，**不在 `$HOME`**，因此不会被 `/home/user` 的
@@ -44,9 +45,9 @@
 
 ```bash
 cd ~/apps/uniagent
-docker compose up -d --build     # 构建并启动
-docker compose logs -f           # 看 entrypoint 输出
-docker compose down              # 停止
+docker compose pull && docker compose up -d   # 拉 CI 编译好的镜像并启动
+docker compose logs -f                        # 看 entrypoint 输出
+docker compose down                           # 停止
 ```
 
 ### 进容器：`uniagent`
@@ -138,12 +139,60 @@ agent 版本需 ≤ 集群 auth 版本；集群是 v18 时保持 `TELEPORT_CHANN
 
 ## 重建
 
+镜像由 CI 编译发布到 GHCR（`.github/workflows/docker.yml`，amd64 + arm64），**部署侧不 build**：
+
 ```bash
-docker compose build --no-cache && docker compose up -d
+cd ~/apps/uniagent
+docker compose pull && docker compose up -d
 ```
+
+改了 `Dockerfile` / `entrypoint.sh` / `bin/` 就推 main，等 Actions 转绿再执行上面两条。
+要钉死某次提交，把 `docker-compose.yml` 里的 `:latest` 换成 `:sha-<短 sha>`。
 
 镜像重建不会影响 `~/apps/uniagent/home` 里的数据。首次启动时 entrypoint 会把镜像里的 home
 骨架（`.bashrc`、`.local/bin`、`workspace`）补进空的挂载目录，已存在的文件不会被覆盖。
+IM 网关会由 entrypoint 自动拉起，重建后**不需要任何手工补动作**。
+
+## IM 网关（agent-anywhere）
+
+Telegram 消息 → agent-anywhere → claude / opencode（ACP），回复流式写回。程序在镜像里，
+配置在挂载里 —— 这条分界是刻意的：镜像可以随便重建，token 与会话历史不跟着走。
+
+| 东西 | 位置 | 进镜像？ |
+|---|---|---|
+| 程序 | `/usr/bin/agent-anywhere`（`/usr/lib/node_modules/agent-anywhere-cli`） | ✅ 版本钉死 |
+| 守护脚本 | `/usr/local/bin/agent-anywhere-daemon.sh` | ✅ |
+| 配置 | `~/.config/agent-anywhere/config.yaml` | ❌ 挂载 |
+| token | `~/.config/agent-anywhere/.env`（chmod 600） | ❌ 挂载 |
+| 会话绑定 | `~/.config/agent-anywhere/conversations.json` | ❌ 挂载 |
+| 日志 | `~/.config/agent-anywhere/daemon.log` | ❌ 挂载 |
+
+容器 PID 1 是 teleport，没有 systemd，所以守护由 `agent-anywhere-daemon.sh` 顶上：跑在
+独立 tmux 会话里，挂了自动重启，5s→300s 指数退避（跑满 60s 才算健康并重置退避，免得
+配置错误时空转刷 Telegram API）。entrypoint 在 `config.yaml` 存在时自动 `start`，
+所以**没配过的机器不会 crash-loop**。
+
+```bash
+bash /usr/local/bin/agent-anywhere-daemon.sh status   # 状态
+bash /usr/local/bin/agent-anywhere-daemon.sh stop     # 改完配置重启用
+bash /usr/local/bin/agent-anywhere-daemon.sh start
+tail -f ~/.config/agent-anywhere/daemon.log           # 日志
+tmux attach -t agent-anywhere-daemon                  # 贴现场
+```
+
+**升级**：到 agent-anywhere 仓库发一个新 Release（Actions 里跑完 typecheck/lint/test/build
+后 `npm pack` 产出 tarball），把 Dockerfile 里 `AGENT_ANYWHERE_VERSION` 与
+`AGENT_ANYWHERE_SHA256`（取 Release 的 `SHA256SUMS`）改掉，推 main，然后 pull。
+这一层是 Dockerfile 的最后一层，改它不会让前面的 Node / 各 AI CLI 缓存失效。
+
+> ⚠️ `agent-anywhere --version` 打印的是 cli.ts 里硬编码的字符串（当前恒为 `0.2.0`），
+> **不是**真实版本。要看真实版本：
+> `node -p "require('/usr/lib/node_modules/agent-anywhere-cli/package.json').version"`
+
+> ⚠️ 别在 `~/.local` 里再装一份：`$HOME/.local/bin` 在 PATH 里排在 `/usr/bin` 前面，
+> 手敲 `agent-anywhere` 会命中它，而守护进程走的是绝对路径 `/usr/bin/agent-anywhere`，
+> 两边会静默跑成不同版本。真要临时试私有构建，用
+> `AGENT_ANYWHERE_BIN=~/.local/bin/agent-anywhere bash /usr/local/bin/agent-anywhere-daemon.sh start`。
 
 ## 直连 sshd：给机器用的旁路（2026-08-20 加）
 
