@@ -14,10 +14,6 @@
 name: Bump agent-anywhere
 
 on:
-  # 临时：本仓库的 workflow_dispatch 点不了（本机 gh 是只读账号），用一次 push 触发让
-  # 这条流水线跑一遍真机，验证完立刻删掉这三行。
-  push:
-    paths: ['.github/workflows/bump-agent-anywhere.yml']
   schedule:
     - cron: '23 21 * * *' # 每天 05:23 CST（UTC+8）
   workflow_dispatch:
