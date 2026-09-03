@@ -56,5 +56,24 @@ if [ -x /usr/sbin/sshd ]; then
     fi
 fi
 
+# ---- agent-anywhere：IM 网关（Telegram ↔ claude/opencode/…）----
+# 与上面的 sshd 段同样的姿态：只在镜像里装了才动作（旧镜像也能用这份 entrypoint），
+# 失败只警告、不退出 —— teleport 是主进程，不能被网关拖垮。
+#
+# 以 config.yaml 存在为前提：镜像里不含任何配置与 token，没配过的新机器直接跳过，
+# 不会 crash-loop。配置只住在 ~/.config/agent-anywhere/（bind mount）。
+#
+# runuser 而不是直接跑：网关必须是 user（uid 1001），它复用的是 /home/user 下的
+# claude/opencode 登录态。**HOME 必须显式传** —— runuser -u 不模拟登录、不改 HOME，
+# 不传的话脚本会去 /root/.config 找配置，然后判定"缺配置"退出。
+if [ -x /usr/bin/agent-anywhere ] && [ -f "${HOME_DIR}/.config/agent-anywhere/config.yaml" ]; then
+    if /usr/sbin/runuser -u "${USERNAME}" -- env HOME="${HOME_DIR}" \
+        /usr/local/bin/agent-anywhere-daemon.sh start; then
+        :
+    else
+        echo "[entrypoint] !! agent-anywhere 启动失败（teleport 不受影响）" >&2
+    fi
+fi
+
 echo "[entrypoint] ready: $(date '+%F %T %Z')  cmd: $*"
 exec "$@"

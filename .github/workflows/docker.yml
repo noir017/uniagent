@@ -6,9 +6,9 @@
 #   docker pull ghcr.io/noir017/uniagent:latest        # main 最新
 #   docker pull ghcr.io/noir017/uniagent:sha-<短 sha>  # 钉死某次提交
 #
-# 部署侧改用镜像时，把 docker-compose.yml 的 build: 段换成
-#   image: ghcr.io/noir017/uniagent:latest
-# （当前 compose 仍是本地 build，CI 不影响它。）
+# 部署侧（docker-compose.yml）已经直接用 image: ghcr.io/noir017/uniagent:latest，
+# 不再本地 build —— 更新就是 push main → 等本 workflow 绿 → 目标机
+# docker compose pull && docker compose up -d。
 #
 # 仓库 Actions 权限需允许 GITHUB_TOKEN 写 Packages。
 # 第一次推送后，到仓库右侧 Packages 把包公开（仓库本身是公开的）。
@@ -19,8 +19,8 @@ on:
   push:
     branches: [main]
     # 只改文档不重建：这个镜像单架构要十几分钟，两架构更久。
-    # 镜像内容只取决于 Dockerfile 与 entrypoint.sh，其余文件（compose、ua/uniagent
-    # 包装脚本、ssh/teleport 配置）都是宿主侧的，不进镜像。
+    # 镜像内容只取决于 Dockerfile、entrypoint.sh 与 bin/（会被 COPY 进去），
+    # 其余文件（compose、ua/uniagent 包装脚本、ssh/teleport 配置）都是宿主侧的，不进镜像。
     paths-ignore:
       - 'README.md'
       - 'LICENSE'

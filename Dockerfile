@@ -156,6 +156,39 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     gh --version
 
+# ---------- 11. agent-anywhere（IM 网关：Telegram ↔ claude/opencode/…）----------
+# 装的是 GitHub Release 里的 tarball，不是 npm 上的包：npm 上的 agent-anywhere-cli
+# 归上游所有，本仓库这条线的版本只在 Release 上发。该 tarball 由 agent-anywhere 的
+# release.yml 在 Actions 里跑完 typecheck/lint/test/build 后 npm pack 产出，
+# 与 npm publish 出来的字节一致。
+#
+# 单独最后一层：升版本只重建这一层，前面 Node / 各 AI CLI 全走缓存。
+# 升级方法：改下面两个 ARG（版本 + 校验和，校验和取 Release 里的 SHA256SUMS），
+# 推 main 即可，CI 会重新编译发布。
+#
+# 装到 /usr（npm prefix 就是 /usr）而不是 /home/user：后者是 bind mount，
+# 会被宿主机目录整个遮蔽，程序就又变成"挂载里的临时文件"了 —— 那正是这一层要消灭的状态。
+#
+# 版本断言只能看已装包的 package.json：`agent-anywhere --version` 打印的是 cli.ts 里
+# 硬编码的字符串（当前恒为 0.2.0），跟真实版本无关，拿它断言会永远"通过"。
+ARG AGENT_ANYWHERE_VERSION=0.4.0
+ARG AGENT_ANYWHERE_SHA256=efc210498b0a27f65b8d1346afde87e378741c12b389e28e898db352f2b83795
+RUN set -eux; \
+    curl -fsSL -o /tmp/aa.tgz \
+        "https://github.com/noir017/agent-anywhere/releases/download/v${AGENT_ANYWHERE_VERSION}/agent-anywhere-cli-${AGENT_ANYWHERE_VERSION}.tgz"; \
+    echo "${AGENT_ANYWHERE_SHA256}  /tmp/aa.tgz" | sha256sum -c -; \
+    npm install -g /tmp/aa.tgz; \
+    rm -f /tmp/aa.tgz; \
+    npm cache clean --force; \
+    installed="$(node -p "require('/usr/lib/node_modules/agent-anywhere-cli/package.json').version")"; \
+    test "${installed}" = "${AGENT_ANYWHERE_VERSION}"; \
+    echo "agent-anywhere ${installed} installed at $(command -v agent-anywhere)"; \
+    agent-anywhere --help > /dev/null
+
+# 守护脚本放最后：改脚本不触发上面的下载层。
+COPY bin/agent-anywhere-daemon.sh /usr/local/bin/agent-anywhere-daemon.sh
+RUN chmod +x /usr/local/bin/agent-anywhere-daemon.sh
+
 WORKDIR /home/user
 ENTRYPOINT ["/usr/bin/tini","--","/usr/local/sbin/entrypoint.sh"]
 CMD ["sleep","infinity"]
