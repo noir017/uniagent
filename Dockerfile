@@ -169,10 +169,11 @@ RUN set -eux; \
 # 装到 /usr（npm prefix 就是 /usr）而不是 /home/user：后者是 bind mount，
 # 会被宿主机目录整个遮蔽，程序就又变成"挂载里的临时文件"了 —— 那正是这一层要消灭的状态。
 #
-# 版本断言只能看已装包的 package.json：`agent-anywhere --version` 打印的是 cli.ts 里
-# 硬编码的字符串（当前恒为 0.2.0），跟真实版本无关，拿它断言会永远"通过"。
-ARG AGENT_ANYWHERE_VERSION=1.0.0
-ARG AGENT_ANYWHERE_SHA256=1780d2e7a364979d99d0fdefe858c13d9b867f6d02c312dc5418cd4a2a998602
+# 版本断言看已装包的 package.json。1.1.0 起 `agent-anywhere --version` 也是真的了
+# （之前是 cli.ts 里硬编码的 0.2.0，拿它断言会永远"通过"），但读 package.json 仍然更直接：
+# 断言的是"装进镜像的那个包"，不经过 CLI 启动路径。
+ARG AGENT_ANYWHERE_VERSION=1.1.0
+ARG AGENT_ANYWHERE_SHA256=fa10b26f71fd1d438afcf79495e3ddbe117e9c9eecccad387bdefa590d5a8362
 RUN set -eux; \
     curl -fsSL -o /tmp/aa.tgz \
         "https://github.com/noir017/agent-anywhere/releases/download/v${AGENT_ANYWHERE_VERSION}/agent-anywhere-cli-${AGENT_ANYWHERE_VERSION}.tgz"; \
