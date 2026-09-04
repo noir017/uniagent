@@ -171,8 +171,8 @@ RUN set -eux; \
 #
 # 版本断言只能看已装包的 package.json：`agent-anywhere --version` 打印的是 cli.ts 里
 # 硬编码的字符串（当前恒为 0.2.0），跟真实版本无关，拿它断言会永远"通过"。
-ARG AGENT_ANYWHERE_VERSION=0.9.0
-ARG AGENT_ANYWHERE_SHA256=f08e7eb7afcbd9a9a5d31534f4687186cbe3b9ccb3306010bf4151cc3c0ed30f
+ARG AGENT_ANYWHERE_VERSION=0.10.0
+ARG AGENT_ANYWHERE_SHA256=bd0cda83be6a97e456276a6cfdc086a1afdb30b4e51e7a726170c16fe435814f
 RUN set -eux; \
     curl -fsSL -o /tmp/aa.tgz \
         "https://github.com/noir017/agent-anywhere/releases/download/v${AGENT_ANYWHERE_VERSION}/agent-anywhere-cli-${AGENT_ANYWHERE_VERSION}.tgz"; \
