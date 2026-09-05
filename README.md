@@ -21,6 +21,7 @@
 | Claude Code | `claude` | npm `@anthropic-ai/claude-code` |
 | Codex CLI | `codex` | npm `@openai/codex` |
 | Antigravity CLI | `agy` | 官方安装脚本，装在 `/usr/local/bin`，属主 `user`（便于自更新） |
+| agyacct | `agyacct` | agy 的多 Google 账号切换器（本仓库 `bin/agyacct`）。见「agy 多账号切换」一节 |
 | Go | `/usr/local/go/bin/go` | 官方 tarball（`GO_VERSION` ARG，当前 1.27.0），`go`/`gofmt` 已软链进 `/usr/local/bin` |
 | uv / uvx | `/usr/local/bin/uv` | Astral 官方脚本 |
 | Teleport agent | `teleport` | apt 源 `stable/v18`，**钉 18.10.0**（不能比集群 auth 新），默认不启动 |
@@ -76,6 +77,39 @@ uniagent --workspace        # 落到 ~/workspace
 
 各 CLI 首次使用需自行登录（`claude`、`codex login`、`opencode auth login`、`agy`），
 凭据写在 `/home/user` 下，已持久化。SSH 会话里 `agy` 会打印授权 URL，在本地浏览器打开即可。
+
+### agy 多账号切换：`agyacct`
+
+`agy` 自己只认一份凭据，换 Google 号得重新走一遍登录。`agyacct` 把凭据文件
+（`~/.gemini/antigravity-cli/antigravity-oauth-token`）快照成具名 profile，切换即原子替换该文件：
+
+```bash
+agyacct save main          # 把当前登录的号存下来（顺带就是份凭据备份）
+agyacct login personal     # 走一遍 agy 登录流程，登完自动存为 personal
+agyacct list               # 列表，* 标当前；邮箱是自动识别的，不用手工贴标签
+agyacct use main           # 切回去（或 agyacct next 循环切）
+agyacct doctor             # 环境体检
+```
+
+profile 存在 `~/.config/agy-accounts/`（持久卷，重建镜像不丢）。完整命令见 `agyacct help`。
+
+三个需要知道的点：
+
+- **切换前请退出 agy。** 切换对已启动的会话无效，且 agy 刷新 token 时会把旧凭据写回文件、
+  覆盖掉这次切换。`agyacct` 默认拒绝在 agy 运行时切换，`-f` 可强制（带告警）。
+- **账号身份按 `refresh_token` 认，不是比对文件。** agy 会就地刷新 `access_token` 并写回，
+  文件内容一直在变；`refresh_token` 刷新后不变，才是稳定指纹。切换前脚本会先把线上文件
+  回灌给它所属的 profile，避免丢掉 agy 刚刷新的 token。
+- **依赖"文件是唯一凭据来源"这个前提。** agy 其实优先读 OS keyring（条目
+  `service=gemini` / `username=antigravity`），文件只是兜底；本镜像没装 secret-tool 也没有
+  D-Bus session，所以这条路走不通，改文件必定生效。若将来镜像里加了 gnome-keyring，
+  `agyacct doctor` 会检测到并给出排查/清除命令。
+
+邮箱识别是拿 `refresh_token` 换 `id_token` 解出来的，用的 OAuth 客户端**在运行时从 `agy` 二进制里
+提取**（不硬编码：仓库里不放凭据字面量，且 agy 换客户端时能自动跟上）。二进制里的候选不止一组，
+脚本逐个真打一次接口，认证通过的那对才缓存进 `~/.config/agy-accounts/.oauth-client.json`；
+agy 自更新后二进制指纹变了会自动重新探测。这一步需要能访问 `oauth2.googleapis.com`；
+不通时 profile 照样能存能切，只是显示 `<未知>`，之后补跑 `agyacct refresh <名字>` 即可。
 
 ## 网络：怎么够到家里的堡垒机
 
