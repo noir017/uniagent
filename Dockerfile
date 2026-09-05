@@ -197,6 +197,21 @@ RUN chmod +x /usr/local/bin/agent-anywhere-daemon.sh
 COPY mcp/hindsight-recall.mjs /usr/local/lib/hindsight-recall/hindsight-recall.mjs
 RUN node --check /usr/local/lib/hindsight-recall/hindsight-recall.mjs
 
+# agy 多 Google 账号切换器。agy 自己只认一份凭据，换号得重登；这个脚本把
+# ~/.gemini/antigravity-cli/antigravity-oauth-token 快照成具名 profile，切换即原子替换该文件。
+# 和 agy 一样放 /usr/local/bin：它是代码不是配置，留在 $HOME 会被 bind mount 的持久卷盖住，
+# 镜像更新推不下去。profile 数据本身仍在 ~/.config/agy-accounts/（持久卷，重建不丢）。
+#
+# 之所以敢改文件就生效：agy 优先读 OS keyring、文件只是兜底，而本镜像没装 secret-tool
+# 也没有 D-Bus session，keyring 那条路根本走不通 —— 文件就是唯一来源。
+# 哪天镜像里加了 gnome-keyring/kwallet，这个前提就没了，`agyacct doctor` 会检测并告警。
+#
+# 运行时依赖 jq / curl / python3 / procps(pgrep) 都在第 1 段的 apt 里；flock(util-linux)
+# 和 tar 是 Debian 必装包。同样放最后，改脚本不触发上面的下载层。
+COPY bin/agyacct /usr/local/bin/agyacct
+RUN chmod +x /usr/local/bin/agyacct; \
+    bash -n /usr/local/bin/agyacct
+
 WORKDIR /home/user
 ENTRYPOINT ["/usr/bin/tini","--","/usr/local/sbin/entrypoint.sh"]
 CMD ["sleep","infinity"]

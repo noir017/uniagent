@@ -1,0 +1,931 @@
+#!/usr/bin/env bash
+# agyacct — Antigravity CLI (agy) 多 Google 账号切换器
+#
+# 原理：agy 的 OAuth 凭据落在单个文件里（默认 ~/.gemini/antigravity-cli/antigravity-oauth-token），
+# 格式为 {"token":{access_token,token_type,refresh_token,expiry},"auth_method":"consumer"}。
+# 本脚本把该文件快照成「profile」，切换即原子替换该文件。
+#
+# 三个必须知道的前提：
+#  1. agy 优先读 OS keyring，文件只是兜底。若本机有 secret-tool + 可达的 D-Bus，
+#     keyring 里的条目（service=gemini, username=antigravity）会盖过文件 —— `doctor` 会检测并告警。
+#  2. agy 运行中会把刷新后的 token 写回该文件。切换前本脚本会先把线上文件回灌到它所属的
+#     profile（sync-back），避免丢失刚刷新的 access_token；agy 正在跑时切换会告警。
+#  3. access_token 约 1 小时过期，refresh_token 长期有效且刷新后不变 —— 所以「当前是哪个号」
+#     一律按 refresh_token 匹配，而不是比对整个文件。
+#
+# 依赖：bash 4+, jq, curl, python3, flock, grep, pgrep
+
+set -euo pipefail
+
+VERSION="1.0.0"
+PROG="${0##*/}"
+
+# ---------------------------------------------------------------- 配置
+
+AGY_TOKEN_FILE="${AGY_TOKEN_FILE:-$HOME/.gemini/antigravity-cli/antigravity-oauth-token}"
+STORE="${AGYACCT_HOME:-$HOME/.config/agy-accounts}"
+PROFILES="$STORE/profiles"
+BACKUPS="$STORE/backups"
+LOCKFILE="$STORE/.lock"
+
+# agy 内嵌的 installed-app OAuth 客户端，用来拿 id_token 识别账号邮箱。
+# 刻意不硬编码：仓库里不放凭据字面量（GitHub push protection 会拦，本来也不该放），
+# 而且 agy 换客户端时这里能自动跟上。改为运行时从 agy 二进制里提取候选并逐个实际验证，
+# 命中的那对缓存进 $STORE/.oauth-client.json；二进制变了（agy 自更新）自动重新探测。
+OAUTH_TOKEN_URL="https://oauth2.googleapis.com/token"
+AGY_BIN="${AGY_BIN:-$(command -v agy 2>/dev/null || true)}"
+
+# ---------------------------------------------------------------- 输出
+
+if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+  C_RST=$'\033[0m'; C_DIM=$'\033[2m'; C_B=$'\033[1m'
+  C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YEL=$'\033[33m'; C_CYN=$'\033[36m'
+else
+  C_RST=""; C_DIM=""; C_B=""; C_RED=""; C_GRN=""; C_YEL=""; C_CYN=""
+fi
+
+die()  { printf '%serror:%s %s\n' "$C_RED" "$C_RST" "$*" >&2; exit 1; }
+warn() { printf '%swarn:%s  %s\n' "$C_YEL" "$C_RST" "$*" >&2; }
+info() { printf '%s\n' "$*"; }
+ok()   { printf '%s✓%s %s\n' "$C_GRN" "$C_RST" "$*"; }
+
+# ---------------------------------------------------------------- 基础设施
+
+need_cmds() {
+  local missing=()
+  for c in jq curl python3 flock grep; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
+  ((${#missing[@]})) && die "缺少依赖: ${missing[*]}"
+  return 0
+}
+
+ensure_store() {
+  mkdir -p "$PROFILES" "$BACKUPS"
+  chmod 700 "$STORE" "$PROFILES" "$BACKUPS" 2>/dev/null || true
+}
+
+# 全局互斥，避免两个进程同时改 token 文件
+acquire_lock() {
+  ensure_store
+  exec 9>"$LOCKFILE"
+  flock -w 10 9 || die "另一个 $PROG 实例正在运行（锁: $LOCKFILE）"
+}
+
+valid_name() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+    || die "profile 名不合法: '$1'（只允许字母数字和 . _ -，首字符须为字母或数字，≤64 字符）"
+}
+
+profile_path() { printf '%s/%s.json' "$PROFILES" "$1"; }
+meta_path()    { printf '%s/%s.meta.json' "$PROFILES" "$1"; }
+
+profile_exists() { [[ -f "$(profile_path "$1")" ]]; }
+
+require_profile() {
+  profile_exists "$1" || die "profile 不存在: '$1'（用 \`$PROG list\` 看有哪些）"
+}
+
+# 原子写入：临时文件 + chmod + mv
+atomic_write() {
+  local dest="$1" tmp
+  tmp="$(mktemp "${dest}.XXXXXX")"
+  cat > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$dest"
+}
+
+# 校验一份 token JSON 是否是 agy 认得的结构
+validate_token_json() {
+  local f="$1"
+  [[ -s "$f" ]] || return 1
+  jq -e '
+    (.token | type == "object")
+    and (.token.access_token  | type == "string" and length > 0)
+    and (.token.refresh_token | type == "string" and length > 0)
+    and (.token.expiry        | type == "string" and length > 0)
+  ' "$f" >/dev/null 2>&1
+}
+
+redact() {
+  local s="${1:-}"
+  [[ -z "$s" || "$s" == "null" ]] && { printf '<空>'; return; }
+  printf '%s…<len %d>' "${s:0:12}" "${#s}"
+}
+
+# bash 的 printf 按字节补空格，中文会把表格挤歪。
+# 这里按「显示宽度」补：CJK 字符占 2 列，其余占 1 列。
+disp_width() {
+  local s="$1" i ch w=0
+  for (( i = 0; i < ${#s}; i++ )); do
+    ch="${s:i:1}"
+    if [[ "$ch" == [$'ᄀ'-$'ᅟ'$'⺀'-$'〾'$'ぁ'-$'㏿'$'㐀'-$'䶿'$'一'-$'鿿'$'ꀀ'-$'꓏'$'가'-$'힣'$'豈'-$'﫿'$'︰'-$'﹯'$'＀'-$'｠'$'￠'-$'￦'] ]]; then
+      w=$(( w + 2 ))
+    else
+      w=$(( w + 1 ))
+    fi
+  done
+  printf '%d' "$w"
+}
+
+# pad <字符串> <目标显示宽度>  → 字符串 + 补足的空格
+pad() {
+  local s="$1" target="$2" w n
+  w="$(disp_width "$s")"
+  n=$(( target - w ))
+  (( n < 0 )) && n=0
+  printf '%s%*s' "$s" "$n" ""
+}
+
+# ---------------------------------------------------------------- token 检查
+
+live_exists() { [[ -f "$AGY_TOKEN_FILE" ]]; }
+
+live_refresh_token() {
+  live_exists || return 1
+  jq -r '.token.refresh_token // empty' "$AGY_TOKEN_FILE" 2>/dev/null
+}
+
+profile_refresh_token() {
+  jq -r '.token.refresh_token // empty' "$(profile_path "$1")" 2>/dev/null
+}
+
+# 当前生效的是哪个 profile —— 按 refresh_token 匹配（access_token 会被 agy 刷新，不能用来比对）
+current_profile() {
+  local live; live="$(live_refresh_token 2>/dev/null || true)"
+  [[ -z "$live" ]] && return 1
+  local f name
+  for f in "$PROFILES"/*.json; do
+    [[ -e "$f" ]] || continue
+    [[ "$f" == *.meta.json ]] && continue
+    name="$(basename "$f" .json)"
+    [[ "$(profile_refresh_token "$name")" == "$live" ]] && { printf '%s' "$name"; return 0; }
+  done
+  return 1
+}
+
+# 输出 "状态|人类可读剩余时间"
+token_status() {
+  local f="$1"
+  [[ -f "$f" ]] || { printf 'missing|-'; return; }
+  python3 - "$f" <<'PY'
+import sys, json, datetime
+try:
+    d = json.load(open(sys.argv[1]))
+    e = datetime.datetime.fromisoformat(d["token"]["expiry"])
+    n = datetime.datetime.now(datetime.timezone.utc)
+    s = (e - n).total_seconds()
+    if s <= 0:
+        m = -s
+        if   m < 3600:  human = "过期 %dm" % (m // 60)
+        elif m < 86400: human = "过期 %dh" % (m // 3600)
+        else:           human = "过期 %dd" % (m // 86400)
+        print("expired|" + human)
+    else:
+        if   s < 3600: human = "%dm" % (s // 60)
+        else:          human = "%dh%dm" % (s // 3600, (s % 3600) // 60)
+        print("valid|剩 " + human)
+except Exception:
+    print("bad|-")
+PY
+}
+
+oauth_cache_file() { printf '%s/.oauth-client.json' "$STORE"; }
+
+# agy 二进制的「指纹」：大小+mtime。变了就重新探测 OAuth 客户端（agy 会后台自更新）。
+agy_bin_sig() {
+  [[ -n "$AGY_BIN" && -e "$AGY_BIN" ]] || { printf ''; return; }
+  stat -c '%s:%Y' "$AGY_BIN" 2>/dev/null || printf ''
+}
+
+# 从 agy 二进制里捞出所有 (client_id, client_secret) 候选组合，每行 "id<TAB>secret"。
+# 用 grep -a 而不是 strings：grep 是必装包，binutils 不一定在。
+discover_oauth_candidates() {
+  [[ -n "$AGY_BIN" && -r "$AGY_BIN" ]] || return 1
+  local ids secrets i s
+  ids="$(grep -aoE '[0-9]{6,}-[a-z0-9]{16,}\.apps\.googleusercontent\.com' "$AGY_BIN" 2>/dev/null | sort -u)"
+  secrets="$(grep -aoE 'GOCSPX-[A-Za-z0-9_-]{28}' "$AGY_BIN" 2>/dev/null | sort -u)"
+  [[ -n "$ids" && -n "$secrets" ]] || return 1
+  while IFS= read -r i; do
+    [[ -z "$i" ]] && continue
+    while IFS= read -r s; do
+      [[ -z "$s" ]] && continue
+      printf '%s\t%s\n' "$i" "$s"
+    done <<< "$secrets"
+  done <<< "$ids"
+}
+
+# 拿 refresh_token 换一次 token。成功则把响应 JSON 打到 stdout，失败返回非 0。
+token_exchange() {
+  local cid="$1" cs="$2" rt="$3" resp
+  resp="$(curl -sS --max-time 25 -X POST "$OAUTH_TOKEN_URL" \
+      -d "client_id=$cid" -d "client_secret=$cs" \
+      -d "refresh_token=$rt" -d "grant_type=refresh_token" 2>/dev/null)" || return 1
+  printf '%s' "$resp" | jq -e 'has("id_token")' >/dev/null 2>&1 || return 1
+  printf '%s' "$resp"
+}
+
+# 定出可用的 OAuth 客户端，输出 "client_id<TAB>client_secret"。
+# 先用缓存；缓存缺失或 agy 二进制变过，就重新探测——候选逐个真打一次接口，
+# 认证通过的那对才算数（二进制里的 GOCSPX- 串不止一个，多数是无效的）。
+resolve_oauth_client() {
+  local rt="$1" cf sig cid cs cached_sig
+  cf="$(oauth_cache_file)"; sig="$(agy_bin_sig)"
+
+  if [[ -f "$cf" ]]; then
+    cid="$(jq -r '.client_id // empty' "$cf" 2>/dev/null || true)"
+    cs="$(jq -r '.client_secret // empty' "$cf" 2>/dev/null || true)"
+    cached_sig="$(jq -r '.agy_sig // empty' "$cf" 2>/dev/null || true)"
+    if [[ -n "$cid" && -n "$cs" && "$cached_sig" == "$sig" ]]; then
+      printf '%s\t%s\n' "$cid" "$cs"; return 0
+    fi
+  fi
+
+  while IFS=$'\t' read -r cid cs; do
+    [[ -z "$cid" || -z "$cs" ]] && continue
+    if token_exchange "$cid" "$cs" "$rt" >/dev/null 2>&1; then
+      jq -n --arg i "$cid" --arg s "$cs" --arg g "$sig" \
+        '{client_id:$i, client_secret:$s, agy_sig:$g}' | atomic_write "$cf"
+      printf '%s\t%s\n' "$cid" "$cs"; return 0
+    fi
+  done < <(discover_oauth_candidates || true)
+  return 1
+}
+
+# 用 refresh_token 换 id_token，解出邮箱。stdout: "email<TAB>sub"，失败返回非 0
+fetch_identity() {
+  local rt="$1" pair cid cs resp
+  pair="$(resolve_oauth_client "$rt")" || return 1
+  cid="${pair%%$'\t'*}"; cs="${pair##*$'\t'}"
+  resp="$(token_exchange "$cid" "$cs" "$rt")" || return 1
+  printf '%s' "$resp" | python3 -c '
+import sys, json, base64
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if "id_token" not in d:
+    sys.stderr.write(d.get("error_description") or d.get("error") or "无 id_token")
+    sys.exit(1)
+p = d["id_token"].split(".")[1]; p += "=" * (-len(p) % 4)
+c = json.loads(base64.urlsafe_b64decode(p))
+print("%s\t%s" % (c.get("email", ""), c.get("sub", "")))
+' || return 1
+}
+
+meta_get() {
+  local name="$1" key="$2" mf; mf="$(meta_path "$name")"
+  [[ -f "$mf" ]] || { printf ''; return; }
+  jq -r --arg k "$key" '.[$k] // empty' "$mf" 2>/dev/null
+}
+
+meta_set() {
+  local name="$1"; shift
+  local mf; mf="$(meta_path "$name")"
+  local base='{}'
+  [[ -f "$mf" ]] && base="$(cat "$mf")"
+  local filter='.' args=()
+  while (( $# >= 2 )); do
+    filter="$filter | .[\"$1\"] = \$v_$1"
+    args+=(--arg "v_$1" "$2")
+    shift 2
+  done
+  printf '%s' "$base" | jq "${args[@]}" "$filter" | atomic_write "$mf"
+}
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+agy_running() { pgrep -x agy >/dev/null 2>&1; }
+
+keyring_shadow_risk() {
+  command -v secret-tool >/dev/null 2>&1 \
+    && { [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] || [[ -S "/run/user/$(id -u)/bus" ]]; }
+}
+
+# 把线上文件回灌到它所属的 profile，避免丢失 agy 刚刷新的 access_token
+sync_back() {
+  local cur
+  if cur="$(current_profile)"; then
+    if ! cmp -s "$AGY_TOKEN_FILE" "$(profile_path "$cur")"; then
+      atomic_write "$(profile_path "$cur")" < "$AGY_TOKEN_FILE"
+      info "  ${C_DIM}已回灌线上 token 到 profile '$cur'（保留刷新后的 access_token）${C_RST}"
+    fi
+    printf '%s' "$cur"
+    return 0
+  fi
+  return 1
+}
+
+# ---------------------------------------------------------------- 命令
+
+cmd_help() {
+cat <<EOF
+${C_B}$PROG${C_RST} v$VERSION — Antigravity CLI (agy) 多 Google 账号切换器
+
+${C_B}用法${C_RST}
+  $PROG <命令> [参数]
+
+${C_B}日常${C_RST}
+  ${C_CYN}list${C_RST}, ls              列出所有 profile，标出当前生效的那个
+  ${C_CYN}use${C_RST} <名字>            切换到某个 profile（别名: switch）
+  ${C_CYN}next${C_RST}                  按字母序循环切到下一个
+  ${C_CYN}current${C_RST}               只打印当前 profile 名（脚本友好）
+  ${C_CYN}whoami${C_RST}                查线上 token 属于哪个 Google 账号（联网）
+
+${C_B}管理${C_RST}
+  ${C_CYN}save${C_RST} <名字> [-f]      把当前线上 token 存为 profile（-f 覆盖已存在的）
+        [--note <备注>]
+  ${C_CYN}login${C_RST} <名字>          走一遍 agy 登录流程，登完自动存为该 profile
+  ${C_CYN}show${C_RST} <名字>           看某个 profile 的详情（token 一律脱敏）
+  ${C_CYN}rename${C_RST} <旧> <新>      改名
+  ${C_CYN}remove${C_RST} <名字> [-f]    删除（别名: rm；-f 跳过确认）
+  ${C_CYN}refresh${C_RST} <名字|--all>  刷新 access_token 并重新识别邮箱
+
+${C_B}维护${C_RST}
+  ${C_CYN}backup${C_RST} [路径]         打包所有 profile 成 tar.gz
+  ${C_CYN}restore${C_RST} <路径> [-f]   从备份恢复
+  ${C_CYN}doctor${C_RST}                环境体检（keyring 冲突、权限、依赖、连通性）
+  ${C_CYN}help${C_RST}                  本帮助
+  ${C_CYN}version${C_RST}               版本号
+
+${C_B}全局选项${C_RST}
+  --json                在 list / show / current / whoami 上输出 JSON
+
+${C_B}环境变量${C_RST}
+  AGY_TOKEN_FILE        agy token 文件路径
+                        (默认 ~/.gemini/antigravity-cli/antigravity-oauth-token)
+  AGYACCT_HOME          profile 存储目录 (默认 ~/.config/agy-accounts)
+  NO_COLOR              关掉颜色
+
+${C_B}典型流程${C_RST}
+  $PROG save work                  # 先把当前登录的号存下来
+  $PROG login personal             # 登录第二个号并存下来
+  $PROG list                       # 看看有哪些
+  $PROG use work                   # 切回去
+
+${C_B}注意${C_RST}
+  agy 运行中切换不会立即生效，且 agy 可能把旧 token 写回文件覆盖你的切换。
+  先退出 agy 再切。$PROG 会检测并告警。
+EOF
+}
+
+# 该 profile 的 token 状态。当前生效的那个要读线上文件 —— agy 会就地刷新它，
+# profile 快照可能是切换时的旧状态，显示快照会误导。
+status_for() {
+  local name="$1" cur="$2"
+  if [[ -n "$cur" && "$name" == "$cur" ]] && live_exists; then
+    token_status "$AGY_TOKEN_FILE"
+  else
+    token_status "$(profile_path "$name")"
+  fi
+}
+
+cmd_list() {
+  local json=0; [[ "${1:-}" == "--json" ]] && json=1
+  local cur=""; cur="$(current_profile 2>/dev/null || true)"
+
+  local names=() f
+  for f in "$PROFILES"/*.json; do
+    [[ -e "$f" ]] || continue
+    [[ "$f" == *.meta.json ]] && continue
+    names+=("$(basename "$f" .json)")
+  done
+
+  if ((json)); then
+    local out="[]" n st stat rem
+    for n in "${names[@]:-}"; do
+      [[ -z "$n" ]] && continue
+      st="$(status_for "$n" "$cur")"; stat="${st%%|*}"; rem="${st##*|}"
+      out="$(printf '%s' "$out" | jq \
+        --arg n "$n" --arg e "$(meta_get "$n" email)" --arg s "$stat" --arg r "$rem" \
+        --arg note "$(meta_get "$n" note)" --arg lu "$(meta_get "$n" last_used)" \
+        --argjson c "$([[ "$n" == "$cur" ]] && echo true || echo false)" \
+        '. += [{name:$n,email:$e,token:$s,remaining:$r,note:$note,last_used:$lu,current:$c}]')"
+    done
+    printf '%s\n' "$out"
+    return
+  fi
+
+  if ((${#names[@]} == 0)); then
+    warn "还没有任何 profile。"
+    info "先把当前登录的账号存下来： ${C_CYN}$PROG save <名字>${C_RST}"
+    return
+  fi
+
+  printf '%s%-2s %-16s %-30s %-14s %-18s %s%s\n' "$C_B" "" "NAME" "EMAIL" "TOKEN" "LAST USED" "NOTE" "$C_RST"
+  local n st stat rem mark email email_out lu note color
+  for n in "${names[@]}"; do
+    st="$(status_for "$n" "$cur")"; stat="${st%%|*}"; rem="${st##*|}"
+    # 邮箱未知时占位是中文，同样得按显示宽度补齐，否则整列错位
+    email="$(meta_get "$n" email)"
+    if [[ -z "$email" ]]; then
+      email_out="${C_DIM}$(pad "<未知>" 30)${C_RST}"
+    else
+      email_out="$(pad "$email" 30)"
+    fi
+    lu="$(meta_get "$n" last_used)";  [[ -z "$lu" ]] && lu="-"
+    note="$(meta_get "$n" note)"
+    case "$stat" in
+      valid)   color="$C_GRN" ;;
+      expired) color="$C_YEL" ;;
+      *)       color="$C_RED" ;;
+    esac
+    if [[ "$n" == "$cur" ]]; then mark="${C_GRN}*${C_RST}"; else mark=" "; fi
+    printf '%s  %-16s %s %b%s%b %-18s %s\n' \
+      "$mark" "$n" "$email_out" "$color" "$(pad "$rem" 14)" "$C_RST" "${lu:0:16}" "$note"
+  done
+
+  if [[ -z "$cur" ]]; then
+    echo
+    if live_exists; then
+      warn "线上 token 不属于任何已存 profile —— 可能是你在 agy 里重新登录过。"
+      info "  存下来： ${C_CYN}$PROG save <名字>${C_RST}"
+    else
+      warn "线上 token 文件不存在（$AGY_TOKEN_FILE）—— agy 当前未登录。"
+    fi
+  fi
+}
+
+cmd_current() {
+  local json=0; [[ "${1:-}" == "--json" ]] && json=1
+  local cur; cur="$(current_profile 2>/dev/null || true)"
+  if ((json)); then
+    jq -n --arg n "$cur" --arg e "$(meta_get "${cur:-}" email 2>/dev/null || true)" \
+      '{current:(if $n=="" then null else $n end), email:(if $e=="" then null else $e end)}'
+    return
+  fi
+  [[ -z "$cur" ]] && { warn "当前 token 不对应任何 profile"; return 1; }
+  printf '%s\n' "$cur"
+}
+
+cmd_whoami() {
+  local json=0; [[ "${1:-}" == "--json" ]] && json=1
+  live_exists || die "线上 token 文件不存在: $AGY_TOKEN_FILE"
+  validate_token_json "$AGY_TOKEN_FILE" || die "线上 token 文件结构不对，不是 agy 格式"
+  local rt ident email sub
+  rt="$(live_refresh_token)"
+  if ! ident="$(fetch_identity "$rt" 2>/dev/null)"; then
+    die "识别失败（网络不通，或该 refresh_token 已被吊销）"
+  fi
+  email="${ident%%$'\t'*}"; sub="${ident##*$'\t'}"
+  local cur; cur="$(current_profile 2>/dev/null || true)"
+  if ((json)); then
+    jq -n --arg e "$email" --arg s "$sub" --arg p "$cur" \
+      '{email:$e, sub:$s, profile:(if $p=="" then null else $p end)}'
+  else
+    printf '%s\n' "$email"
+    [[ -n "$cur" ]] && info "${C_DIM}profile: $cur${C_RST}"
+  fi
+}
+
+cmd_save() {
+  local name="" force=0 note=""
+  while (($#)); do
+    case "$1" in
+      -f|--force) force=1; shift ;;
+      --note) note="${2:-}"; shift 2 ;;
+      -*) die "未知选项: $1" ;;
+      *) [[ -z "$name" ]] && name="$1" || die "多余参数: $1"; shift ;;
+    esac
+  done
+  [[ -z "$name" ]] && die "用法: $PROG save <名字> [-f] [--note <备注>]"
+  valid_name "$name"
+
+  live_exists || die "线上 token 文件不存在: $AGY_TOKEN_FILE（先用 agy 登录）"
+  validate_token_json "$AGY_TOKEN_FILE" \
+    || die "线上 token 文件结构不对，不是 agy 格式：$AGY_TOKEN_FILE"
+
+  if profile_exists "$name" && ((!force)); then
+    die "profile '$name' 已存在（加 -f 覆盖）"
+  fi
+
+  # 存之前先看看这个 token 是不是已经属于别的 profile
+  local rt dup; rt="$(live_refresh_token)"
+  for dup in "$PROFILES"/*.json; do
+    [[ -e "$dup" ]] || continue
+    [[ "$dup" == *.meta.json ]] && continue
+    local dn; dn="$(basename "$dup" .json)"
+    [[ "$dn" == "$name" ]] && continue
+    if [[ "$(profile_refresh_token "$dn")" == "$rt" ]]; then
+      warn "这个账号已经存过了，profile 名叫 '$dn'（继续存会得到两份同账号的 profile）"
+      break
+    fi
+  done
+
+  atomic_write "$(profile_path "$name")" < "$AGY_TOKEN_FILE"
+
+  local email="" sub="" ident
+  if ident="$(fetch_identity "$rt" 2>/dev/null)"; then
+    email="${ident%%$'\t'*}"; sub="${ident##*$'\t'}"
+  else
+    warn "邮箱识别失败（网络不通或 token 已吊销），profile 仍已保存，之后可跑 \`$PROG refresh $name\`"
+  fi
+
+  local args=(added_at "$(now_iso)")
+  [[ -n "$email" ]] && args+=(email "$email")
+  [[ -n "$sub" ]] && args+=(sub "$sub")
+  [[ -n "$note" ]] && args+=(note "$note")
+  meta_set "$name" "${args[@]}"
+
+  ok "已保存 profile '${C_B}$name${C_RST}'${email:+  ($email)}"
+}
+
+cmd_use() {
+  local name="" force=0
+  while (($#)); do
+    case "$1" in
+      -f|--force) force=1; shift ;;
+      -*) die "未知选项: $1" ;;
+      *) [[ -z "$name" ]] && name="$1" || die "多余参数: $1"; shift ;;
+    esac
+  done
+  [[ -z "$name" ]] && die "用法: $PROG use <名字> [-f]"
+  valid_name "$name"; require_profile "$name"
+
+  validate_token_json "$(profile_path "$name")" \
+    || die "profile '$name' 的内容已损坏，拒绝写入"
+
+  local cur; cur="$(current_profile 2>/dev/null || true)"
+  if [[ "$cur" == "$name" ]]; then
+    ok "已经在用 '$name' 了，无需切换"
+    return 0
+  fi
+
+  if agy_running; then
+    if ((force)); then
+      warn "agy 正在运行 —— 切换对已启动的会话无效，且 agy 刷新 token 时可能覆盖本次切换"
+    else
+      die "agy 正在运行。先退出 agy 再切换（确定要切加 -f）"
+    fi
+  fi
+
+  if keyring_shadow_risk; then
+    warn "检测到 secret-tool + D-Bus：agy 优先读 keyring，文件切换可能不生效。跑 \`$PROG doctor\` 看详情"
+  fi
+
+  mkdir -p "$(dirname "$AGY_TOKEN_FILE")"
+
+  # 切换前把线上状态回灌给原 profile
+  if live_exists && validate_token_json "$AGY_TOKEN_FILE"; then
+    sync_back >/dev/null || true
+    if [[ -z "$cur" ]]; then
+      local stash="$BACKUPS/orphan-$(date -u +%Y%m%d-%H%M%S).json"
+      atomic_write "$stash" < "$AGY_TOKEN_FILE"
+      warn "线上 token 不属于任何 profile，已另存到 $stash 以免丢失"
+    fi
+  fi
+
+  atomic_write "$AGY_TOKEN_FILE" < "$(profile_path "$name")"
+  meta_set "$name" last_used "$(now_iso)"
+
+  local email; email="$(meta_get "$name" email)"
+  ok "已切换到 '${C_B}$name${C_RST}'${email:+  ($email)}"
+
+  local st; st="$(token_status "$AGY_TOKEN_FILE")"
+  if [[ "${st%%|*}" == "expired" ]]; then
+    info "  ${C_DIM}access_token 已过期，agy 下次启动会用 refresh_token 自动续（正常现象）${C_RST}"
+  fi
+}
+
+cmd_next() {
+  local names=() f
+  for f in "$PROFILES"/*.json; do
+    [[ -e "$f" ]] || continue
+    [[ "$f" == *.meta.json ]] && continue
+    names+=("$(basename "$f" .json)")
+  done
+  ((${#names[@]} == 0)) && die "没有任何 profile"
+  ((${#names[@]} == 1)) && { ok "只有一个 profile '${names[0]}'，无处可切"; return 0; }
+
+  local cur idx=-1 i
+  cur="$(current_profile 2>/dev/null || true)"
+  for i in "${!names[@]}"; do [[ "${names[$i]}" == "$cur" ]] && idx=$i; done
+  cmd_use "${names[$(( (idx + 1) % ${#names[@]} ))]}"
+}
+
+cmd_show() {
+  local name="${1:-}" json=0
+  [[ "${2:-}" == "--json" ]] && json=1
+  [[ -z "$name" ]] && die "用法: $PROG show <名字>"
+  valid_name "$name"; require_profile "$name"
+
+  local pf; pf="$(profile_path "$name")"
+  local cur; cur="$(current_profile 2>/dev/null || true)"
+  local st; st="$(status_for "$name" "$cur")"
+  # 当前生效的 profile 读线上文件（agy 会就地刷新），其余读快照
+  local srcf="$pf"
+  [[ -n "$cur" && "$name" == "$cur" ]] && live_exists && srcf="$AGY_TOKEN_FILE"
+
+  if ((json)); then
+    jq -n --arg n "$name" --arg e "$(meta_get "$name" email)" \
+       --arg s "${st%%|*}" --arg r "${st##*|}" \
+       --arg a "$(meta_get "$name" added_at)" --arg l "$(meta_get "$name" last_used)" \
+       --arg note "$(meta_get "$name" note)" --arg sub "$(meta_get "$name" sub)" \
+       --arg exp "$(jq -r '.token.expiry' "$srcf")" \
+       --argjson c "$([[ "$name" == "$cur" ]] && echo true || echo false)" \
+       '{name:$n,email:$e,sub:$sub,token:$s,remaining:$r,expiry:$exp,added_at:$a,last_used:$l,note:$note,current:$c}'
+    return
+  fi
+
+  printf '%sprofile%s  %s%s%s%s\n' "$C_DIM" "$C_RST" "$C_B" "$name" "$C_RST" \
+    "$([[ "$name" == "$cur" ]] && printf '  %s(当前生效)%s' "$C_GRN" "$C_RST")"
+  printf '  %-14s %s\n' "email"         "$(meta_get "$name" email)"
+  printf '  %-14s %s\n' "sub"           "$(meta_get "$name" sub)"
+  printf '  %-14s %s (%s)\n' "token"    "${st%%|*}" "${st##*|}"
+  printf '  %-14s %s\n' "expiry"        "$(jq -r '.token.expiry' "$srcf")"
+  printf '  %-14s %s\n' "access_token"  "$(redact "$(jq -r '.token.access_token' "$srcf")")"
+  printf '  %-14s %s\n' "refresh_token" "$(redact "$(jq -r '.token.refresh_token' "$srcf")")"
+  printf '  %-14s %s\n' "auth_method"   "$(jq -r '.auth_method // "-"' "$srcf")"
+  printf '  %-14s %s\n' "added_at"      "$(meta_get "$name" added_at)"
+  printf '  %-14s %s\n' "last_used"     "$(meta_get "$name" last_used)"
+  printf '  %-14s %s\n' "note"          "$(meta_get "$name" note)"
+  printf '  %-14s %s\n' "file"          "$pf"
+}
+
+cmd_rename() {
+  local old="${1:-}" new="${2:-}"
+  [[ -z "$old" || -z "$new" ]] && die "用法: $PROG rename <旧名> <新名>"
+  valid_name "$old"; valid_name "$new"
+  require_profile "$old"
+  profile_exists "$new" && die "profile '$new' 已存在"
+  mv "$(profile_path "$old")" "$(profile_path "$new")"
+  [[ -f "$(meta_path "$old")" ]] && mv "$(meta_path "$old")" "$(meta_path "$new")"
+  ok "'$old' → '$new'"
+}
+
+cmd_remove() {
+  local name="" force=0
+  while (($#)); do
+    case "$1" in
+      -f|--force) force=1; shift ;;
+      -*) die "未知选项: $1" ;;
+      *) [[ -z "$name" ]] && name="$1" || die "多余参数: $1"; shift ;;
+    esac
+  done
+  [[ -z "$name" ]] && die "用法: $PROG remove <名字> [-f]"
+  valid_name "$name"; require_profile "$name"
+
+  local cur; cur="$(current_profile 2>/dev/null || true)"
+  if [[ "$name" == "$cur" ]] && ((!force)); then
+    die "'$name' 是当前生效的 profile。删除不会让 agy 登出，但你会失去这份凭据备份（确定加 -f）"
+  fi
+
+  if ((!force)); then
+    local email; email="$(meta_get "$name" email)"
+    printf '删除 profile %s%s%s%s ? [y/N] ' "$C_B" "$name" "$C_RST" "${email:+ ($email)}"
+    local ans; read -r ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { info "已取消"; return 1; }
+  fi
+
+  rm -f "$(profile_path "$name")" "$(meta_path "$name")"
+  ok "已删除 '$name'"
+}
+
+cmd_refresh() {
+  local targets=()
+  if [[ "${1:-}" == "--all" ]]; then
+    local f
+    for f in "$PROFILES"/*.json; do
+      [[ -e "$f" ]] || continue
+      [[ "$f" == *.meta.json ]] && continue
+      targets+=("$(basename "$f" .json)")
+    done
+    ((${#targets[@]} == 0)) && die "没有任何 profile"
+  else
+    [[ -z "${1:-}" ]] && die "用法: $PROG refresh <名字|--all>"
+    valid_name "$1"; require_profile "$1"; targets=("$1")
+  fi
+
+  local cur; cur="$(current_profile 2>/dev/null || true)"
+  local n rt ident email sub rc=0
+  for n in "${targets[@]}"; do
+    rt="$(profile_refresh_token "$n")"
+    if [[ -z "$rt" ]]; then
+      warn "$n: 没有 refresh_token，跳过"; rc=1; continue
+    fi
+    if ! ident="$(fetch_identity "$rt" 2>/dev/null)"; then
+      warn "$n: 刷新失败（网络不通，或 refresh_token 已被吊销）"; rc=1; continue
+    fi
+    email="${ident%%$'\t'*}"; sub="${ident##*$'\t'}"
+    meta_set "$n" email "$email" sub "$sub" refreshed_at "$(now_iso)"
+    ok "$n → $email"
+    [[ "$n" == "$cur" ]] && info "  ${C_DIM}这是当前生效的 profile；agy 会自己续 access_token，本命令只更新元数据${C_RST}"
+  done
+  return $rc
+}
+
+cmd_login() {
+  local name="${1:-}"
+  [[ -z "$name" ]] && die "用法: $PROG login <名字>"
+  valid_name "$name"
+  command -v agy >/dev/null 2>&1 || die "PATH 里找不到 agy"
+
+  if profile_exists "$name"; then
+    printf "profile '%s' 已存在，登录后会覆盖它。继续? [y/N] " "$name"
+    local ans; read -r ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { info "已取消"; return 1; }
+  fi
+
+  agy_running && die "agy 正在运行，先退出再登录"
+
+  # 先保住当前凭据
+  if live_exists && validate_token_json "$AGY_TOKEN_FILE"; then
+    sync_back >/dev/null || true
+    local stash="$BACKUPS/prelogin-$(date -u +%Y%m%d-%H%M%S).json"
+    atomic_write "$stash" < "$AGY_TOKEN_FILE"
+    info "当前 token 已备份到 ${C_DIM}$stash${C_RST}"
+    rm -f "$AGY_TOKEN_FILE"
+  fi
+
+  info ""
+  info "${C_B}即将启动 agy 进行登录。${C_RST}按提示用${C_B}新的 Google 账号${C_RST}完成授权，"
+  info "登录成功后${C_B}退出 agy${C_RST}（Ctrl+D 或 /quit），本脚本会自动把凭据存为 '$name'。"
+  info ""
+  read -r -p "回车继续…" _ || true
+
+  agy || warn "agy 退出码非 0（$?）—— 继续检查是否已产生凭据"
+
+  if ! live_exists || ! validate_token_json "$AGY_TOKEN_FILE"; then
+    die "没检测到有效凭据，登录大概没成功。备份还在 $BACKUPS/"
+  fi
+
+  cmd_save "$name" -f
+}
+
+cmd_backup() {
+  local dest="${1:-$BACKUPS/agyacct-$(date -u +%Y%m%d-%H%M%S).tar.gz}"
+  local cnt; cnt="$(find "$PROFILES" -maxdepth 1 -name '*.json' ! -name '*.meta.json' 2>/dev/null | wc -l)"
+  (( cnt == 0 )) && die "没有任何 profile 可备份"
+  mkdir -p "$(dirname "$dest")"
+  tar -czf "$dest" -C "$STORE" profiles
+  chmod 600 "$dest"
+  ok "已备份 $cnt 个 profile → $dest"
+  warn "备份里是明文 OAuth 凭据，别放进 git，也别丢到公共目录"
+}
+
+cmd_restore() {
+  local src="" force=0
+  while (($#)); do
+    case "$1" in
+      -f|--force) force=1; shift ;;
+      -*) die "未知选项: $1" ;;
+      *) [[ -z "$src" ]] && src="$1" || die "多余参数: $1"; shift ;;
+    esac
+  done
+  [[ -z "$src" ]] && die "用法: $PROG restore <备份文件> [-f]"
+  [[ -f "$src" ]] || die "找不到备份文件: $src"
+
+  if ((!force)); then
+    info "备份内容："
+    tar -tzf "$src" | sed 's/^/  /'
+    printf '恢复会覆盖同名 profile。继续? [y/N] '
+    local ans; read -r ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { info "已取消"; return 1; }
+  fi
+  tar -xzf "$src" -C "$STORE"
+  chmod 700 "$PROFILES"; chmod 600 "$PROFILES"/*.json 2>/dev/null || true
+  ok "已从 $src 恢复"
+  cmd_list
+}
+
+cmd_doctor() {
+  local issues=0
+  printf '%s依赖%s\n' "$C_B" "$C_RST"
+  local c
+  for c in jq curl python3 flock pgrep grep tar agy; do
+    if command -v "$c" >/dev/null 2>&1; then
+      printf '  %s✓%s %-10s %s\n' "$C_GRN" "$C_RST" "$c" "$(command -v "$c")"
+    else
+      printf '  %s✗%s %-10s 缺失\n' "$C_RED" "$C_RST" "$c"; ((issues++)) || true
+    fi
+  done
+
+  printf '\n%s路径%s\n' "$C_B" "$C_RST"
+  printf '  token 文件   %s\n' "$AGY_TOKEN_FILE"
+  if live_exists; then
+    local perm; perm="$(stat -c %a "$AGY_TOKEN_FILE")"
+    if [[ "$perm" == "600" ]]; then
+      printf '  %s✓%s 存在，权限 %s\n' "$C_GRN" "$C_RST" "$perm"
+    else
+      printf '  %s!%s 存在，权限 %s（建议 600）\n' "$C_YEL" "$C_RST" "$perm"; ((issues++)) || true
+    fi
+    if validate_token_json "$AGY_TOKEN_FILE"; then
+      local st; st="$(token_status "$AGY_TOKEN_FILE")"
+      printf '  %s✓%s 结构合法，token %s (%s)\n' "$C_GRN" "$C_RST" "${st%%|*}" "${st##*|}"
+    else
+      printf '  %s✗%s 结构不是 agy 格式\n' "$C_RED" "$C_RST"; ((issues++)) || true
+    fi
+  else
+    printf '  %s!%s 不存在 —— agy 当前未登录\n' "$C_YEL" "$C_RST"
+  fi
+  printf '  存储目录     %s (%s)\n' "$STORE" "$(stat -c %a "$STORE" 2>/dev/null || echo '不存在')"
+
+  printf '\n%skeyring 冲突风险%s\n' "$C_B" "$C_RST"
+  printf '  secret-tool  %s\n' "$(command -v secret-tool || echo '未安装')"
+  printf '  D-Bus        %s\n' "${DBUS_SESSION_BUS_ADDRESS:-未设置}"
+  if keyring_shadow_risk; then
+    printf '  %s!%s 本机有可用 keyring：agy 优先读 keyring，本脚本改的是文件，切换可能不生效。\n' "$C_YEL" "$C_RST"
+    printf '    %s排查：secret-tool lookup service gemini username antigravity%s\n' "$C_DIM" "$C_RST"
+    printf '    %s清除：secret-tool clear service gemini username antigravity%s\n' "$C_DIM" "$C_RST"
+    ((issues++)) || true
+  else
+    printf '  %s✓%s 无可用 keyring，agy 只能走文件兜底 —— 本脚本可靠生效\n' "$C_GRN" "$C_RST"
+  fi
+
+  printf '\n%s进程%s\n' "$C_B" "$C_RST"
+  if agy_running; then
+    printf '  %s!%s agy 正在运行（pid: %s）—— 切换前请退出\n' "$C_YEL" "$C_RST" "$(pgrep -x agy | tr '\n' ' ')"
+    ((issues++)) || true
+  else
+    printf '  %s✓%s agy 未运行\n' "$C_GRN" "$C_RST"
+  fi
+
+  printf '\n%s连通性%s\n' "$C_B" "$C_RST"
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$OAUTH_TOKEN_URL" 2>/dev/null || echo 000)"
+  if [[ "$code" == "000" ]]; then
+    printf '  %s✗%s oauth2.googleapis.com 不可达 —— 邮箱识别功能不可用\n' "$C_RED" "$C_RST"; ((issues++)) || true
+  else
+    printf '  %s✓%s oauth2.googleapis.com 可达 (HTTP %s)\n' "$C_GRN" "$C_RST" "$code"
+  fi
+
+  printf '\n%sOAuth 客户端（用于识别账号邮箱）%s\n' "$C_B" "$C_RST"
+  printf '  agy 二进制   %s\n' "${AGY_BIN:-<未找到>}"
+  local cand=0
+  # 注意 set -o pipefail：discover 失败会让整条管道非 0，不包一层的话
+  # `|| echo 0` 会在 wc 已经打印过 0 之后再补一个，cand 变成 "0\n0"。
+  cand="$( { discover_oauth_candidates 2>/dev/null || true; } | wc -l )"
+  if (( cand > 0 )); then
+    printf '  %s✓%s 从二进制提取到 %s 组候选\n' "$C_GRN" "$C_RST" "$cand"
+  else
+    printf '  %s!%s 提取不到候选 —— 邮箱识别不可用（profile 照样能存能切，只是显示 <未知>）\n' \
+      "$C_YEL" "$C_RST"; ((issues++)) || true
+  fi
+  local cf; cf="$(oauth_cache_file)"
+  if [[ -f "$cf" ]]; then
+    local ccid csig
+    ccid="$(jq -r '.client_id // empty' "$cf" 2>/dev/null || true)"
+    csig="$(jq -r '.agy_sig // empty' "$cf" 2>/dev/null || true)"
+    if [[ "$csig" == "$(agy_bin_sig)" ]]; then
+      printf '  %s✓%s 已缓存并验证过: %s\n' "$C_GRN" "$C_RST" "${ccid%%-*}-…"
+    else
+      printf '  %s!%s 缓存对应的是旧版 agy，下次识别时会自动重新探测\n' "$C_YEL" "$C_RST"
+    fi
+  else
+    printf '  %s（尚未探测，首次 save/whoami/refresh 时按需进行）%s\n' "$C_DIM" "$C_RST"
+  fi
+
+  printf '\n%sprofile 完整性%s\n' "$C_B" "$C_RST"
+  local n cnt=0 f
+  for f in "$PROFILES"/*.json; do
+    [[ -e "$f" ]] || continue
+    [[ "$f" == *.meta.json ]] && continue
+    n="$(basename "$f" .json)"; ((cnt++)) || true
+    if validate_token_json "$f"; then
+      printf '  %s✓%s %-16s %s\n' "$C_GRN" "$C_RST" "$n" "$(meta_get "$n" email)"
+    else
+      printf '  %s✗%s %-16s 内容损坏\n' "$C_RED" "$C_RST" "$n"; ((issues++)) || true
+    fi
+  done
+  (( cnt == 0 )) && printf '  %s（一个都没有）%s\n' "$C_DIM" "$C_RST"
+
+  printf '\n'
+  if (( issues == 0 )); then
+    ok "体检通过，没发现问题"
+  else
+    warn "发现 $issues 处需要注意（见上文标 ! 或 ✗ 的行）"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------- 入口
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    help|-h|--help) cmd_help; return 0 ;;
+    version|-V|--version) printf '%s %s\n' "$PROG" "$VERSION"; return 0 ;;
+  esac
+
+  need_cmds
+  ensure_store
+  acquire_lock
+
+  case "$cmd" in
+    list|ls)        cmd_list "$@" ;;
+    current)        cmd_current "$@" ;;
+    whoami)         cmd_whoami "$@" ;;
+    save)           cmd_save "$@" ;;
+    use|switch)     cmd_use "$@" ;;
+    next)           cmd_next "$@" ;;
+    show)           cmd_show "$@" ;;
+    rename)         cmd_rename "$@" ;;
+    remove|rm)      cmd_remove "$@" ;;
+    refresh)        cmd_refresh "$@" ;;
+    login)          cmd_login "$@" ;;
+    backup)         cmd_backup "$@" ;;
+    restore)        cmd_restore "$@" ;;
+    doctor)         cmd_doctor "$@" ;;
+    *) die "未知命令: '$cmd'（跑 \`$PROG help\`）" ;;
+  esac
+}
+
+main "$@"
