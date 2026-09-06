@@ -1,0 +1,12 @@
+llm-pi-ai:
+  providers:
+    newapi:
+      api: openai-completions
+      baseURL: http://newapi:3000/v1
+      apiKeyEnv: OPENAI_API_KEY
+      models:
+        - id: deepseek-v4-flash-0731
+        - id: deepseek-v4-pro-0813
+      compat:
+        supportsDeveloperRole: false
+        maxTokensField: max_tokens

@@ -26,6 +26,7 @@
 | uv / uvx | `/usr/local/bin/uv` | Astral 官方脚本 |
 | Teleport agent | `teleport` | apt 源 `stable/v18`，**钉 18.10.0**（不能比集群 auth 新），默认不启动 |
 | agent-anywhere | `agent-anywhere` | IM 网关（Telegram ↔ claude/opencode/…）。版本由 Dockerfile 的 `AGENT_ANYWHERE_VERSION` 钉死（当前 0.4.0），装的是 GitHub Release 的 tarball 并校验 SHA256。见「IM 网关」一节 |
+| DeepSeek Harness | `dsh` | DeepSeek 官方 harness CLI（headless / acp / web 等 profile）。版本由 Dockerfile 的 `DSH_VERSION` 钉死（当前 0.1.2-rc.1），连 newapi 网关的配置预置在 `~/.dsh/`。见「DeepSeek Harness」一节 |
 | 其他 | git、python3、build-essential、jq、ripgrep、fd、tmux、htop… | |
 
 > 所有工具都装在 `/usr/local` 或 `/usr` 下，**不在 `$HOME`**，因此不会被 `/home/user` 的
@@ -110,6 +111,65 @@ profile 存在 `~/.config/agy-accounts/`（持久卷，重建镜像不丢）。�
 脚本逐个真打一次接口，认证通过的那对才缓存进 `~/.config/agy-accounts/.oauth-client.json`；
 agy 自更新后二进制指纹变了会自动重新探测。这一步需要能访问 `oauth2.googleapis.com`；
 不通时 profile 照样能存能切，只是显示 `<未知>`，之后补跑 `agyacct refresh <名字>` 即可。
+
+## DeepSeek Harness（`dsh`）
+
+DeepSeek 官方的 harness：一条命令按 profile 拉起一套可组合的 agent 栈。镜像里预置了程序和
+连 newapi 网关的配置，运行时数据留在挂载卷。
+
+| 东西 | 位置 | 进镜像？ |
+|---|---|---|
+| 程序 | `/usr/bin/dsh`（`/usr/lib/node_modules/@deepseek-ai/dsh`） | ✅ 版本钉死（`DSH_VERSION`，当前 0.1.2-rc.1） |
+| 预置配置 | `~/.dsh/settings.yaml`、`~/.dsh/cordis.patch.yml` | ✅ 首次挂载播种 |
+| 运行时数据 | `~/.dsh/profiles/`、`sessions/`、`storages/`… | ❌ 挂载，重启/重建不丢 |
+
+配置预置走 home 骨架机制：首次挂载空的 `/home/user` 时 entrypoint 会把 `~/.dsh` 补进挂载卷；
+已存在的机器不覆盖。
+
+两个常用 profile：
+
+- `dsh --profile headless "run the tests"` —— 一次性任务，跑完打印结果退出。
+- `dsh --profile acp` —— ACP 模式，给 agent-anywhere 当 harness 用。
+
+### 接 newapi 网关
+
+预置配置已指向容器内网关 `http://newapi:3000/v1`（provider 名 `newapi`），API key 从环境变量
+`OPENAI_API_KEY` 读（`sk-` 开头 51 字符）。**这个环境变量由编排侧提供，镜像里不含 key。**
+两个模型 `deepseek-v4-flash-0731`、`deepseek-v4-pro-0813` 都配在 `~/.dsh/settings.yaml` 的
+`llm-pi-ai.providers.newapi.models` 下。
+
+### 模型切换
+
+- **全局默认模型**：改 `~/.dsh/cordis.patch.yml` 里 `acp`（acp profile 的默认）和
+  `agent-default-model`（agent 默认）两个条目的 `model:`。
+- **可选模型列表**：改 `~/.dsh/settings.yaml` 的 `llm-pi-ai.providers.newapi.models`。
+- 改完需重启对应进程：profile 的 patch 在启动时应用（acp 是 `patchReload: startup`）。
+
+### ⚠️ model 选择器值是 JSON 数组字符串
+
+`dsh --profile acp` 通过 ACP `session/new` 对外发布的 model 选择器值**不是裸模型名**，而是
+`JSON.stringify([provider, model])` 的 JSON 数组字符串，形如 `["newapi","deepseek-v4-flash-0731"]`。
+在 ACP 客户端（agent-anywhere）的模型列表/`/model`、或任何拿模型名做比对的脚本里看到的就是
+这种形态 —— 别拿裸模型名去匹配，要当一整串 JSON 数组字符串处理。
+注意这跟**配置文件**里的 `model: deepseek-v4-flash-0731`（裸 id）是两回事：配置层写裸 id，
+线上一律是 JSON 数组字符串。
+
+### 接 agent-anywhere
+
+镜像**没有**默认 `~/.config/agent-anywhere/config.yaml` 模板（那份配置只在挂载里，见「IM 网关」，
+没配过的机器 entrypoint 直接跳过），所以没有把 dsh agent 条目烤进镜像。要接时在各机器的
+config.yaml 里加：
+
+```yaml
+agents:
+  - id: dsh
+    harness: custom
+    command: dsh
+    args: ["--profile", "acp"]
+```
+
+agent-anywhere 上游的 `dsh` 正式 preset（`harness: dsh`）还在开发，先用
+`harness: custom` + `command: dsh` 指向 ACP 二进制。
 
 ## 网络：怎么够到家里的堡垒机
 
