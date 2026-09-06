@@ -186,6 +186,48 @@ RUN set -eux; \
     echo "agent-anywhere ${installed} installed at $(command -v agent-anywhere)"; \
     agent-anywhere --help > /dev/null
 
+# ---------- 12. DeepSeek Harness (dsh) ----------
+# DeepSeek 官方的 harness CLI（headless / acp / web 等 profile）。装的是 npm 包
+# @deepseek-ai/dsh（上游发布，版本钉在 DSH_VERSION），装出 /usr/bin/dsh。
+#
+# 放在 agent-anywhere 之后、各 COPY 脚本层之前：升级 dsh 只重建这一层 + 后面几个
+# 轻量 COPY 层，前面的 Node / 各 AI CLI / Go / agent-anywhere 全走缓存。
+# 装到 /usr（npm prefix 就是 /usr）而不是 /home/user：后者是 bind mount，会被
+# 宿主机目录整个遮蔽（与 agent-anywhere 同一理由）。
+#
+# 版本断言读已装包的 package.json（断言"装进镜像的那个包"），不依赖 CLI 启动路径。
+ARG DSH_VERSION=0.1.2-rc.1
+RUN set -eux; \
+    npm install -g "@deepseek-ai/dsh@${DSH_VERSION}"; \
+    npm cache clean --force; \
+    installed="$(node -p "require('/usr/lib/node_modules/@deepseek-ai/dsh/package.json').version")"; \
+    test "${installed}" = "${DSH_VERSION}"; \
+    echo "dsh ${installed} installed at $(command -v dsh)"; \
+    dsh --version > /dev/null
+
+# ---------- 12b. DSH 预置配置（~/.dsh）----------
+# 预置连到容器内 newapi 网关的 provider 配置（settings.yaml）与全局 patch 层
+# （cordis.patch.yml）。内容就是"已验证有效"的那份，一字不差。
+#
+# ~/.dsh 是配置不是代码，按本镜像惯例走 /opt/home-skel 播种：首次挂载空的
+# /home/user 时 entrypoint 会把它补进挂载卷；已存在的机器不覆盖（~/.dsh 在挂载卷里，
+# 重启/重建镜像都不丢）。所以同一层同时写进 /home/user/.dsh（镜像内自包含）和
+# /opt/home-skel/.dsh（播种源）。属主给 user：dsh 首次启动要在 ~/.dsh 下建
+# profiles / sessions / storages。
+#
+# 放最后：改这份配置只重建这一层，不触发前面的下载层。
+COPY dsh/settings.yaml dsh/cordis.patch.yml /opt/dsh-config/
+RUN set -eux; \
+    install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.dsh; \
+    cp /opt/dsh-config/settings.yaml /home/${USERNAME}/.dsh/settings.yaml; \
+    cp /opt/dsh-config/cordis.patch.yml /home/${USERNAME}/.dsh/cordis.patch.yml; \
+    chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.dsh; \
+    install -d -o ${USERNAME} -g ${USERNAME} /opt/home-skel/.dsh; \
+    cp /opt/dsh-config/settings.yaml /opt/home-skel/.dsh/settings.yaml; \
+    cp /opt/dsh-config/cordis.patch.yml /opt/home-skel/.dsh/cordis.patch.yml; \
+    chown -R ${USERNAME}:${USERNAME} /opt/home-skel/.dsh; \
+    rm -rf /opt/dsh-config
+
 # 守护脚本放最后：改脚本不触发上面的下载层。
 COPY bin/agent-anywhere-daemon.sh /usr/local/bin/agent-anywhere-daemon.sh
 RUN chmod +x /usr/local/bin/agent-anywhere-daemon.sh
