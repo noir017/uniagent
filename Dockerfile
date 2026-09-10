@@ -17,6 +17,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     USERNAME=${USERNAME}
 
 # ---------- 1. 基础系统与常用工具 ----------
+# 注意 locale：sshd 不继承上面的 ENV，SSH 会话的 LANG 由客户端经 AcceptEnv 送入
+# （本地多为 en_US.UTF-8）。镜像里不生成该 locale 的话 glibc 会静默回落 C locale，
+# 中文文件名就会被 ls 转义成 \344\270\211 这种八进制。故此处显式 locale-gen。
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -29,6 +32,9 @@ RUN set -eux; \
         python3 python3-venv build-essential pkg-config; \
     ln -sf /usr/bin/fdfind /usr/local/bin/fd; \
     ln -snf /usr/share/zoneinfo/${TZ} /etc/localtime; echo ${TZ} > /etc/timezone; \
+    sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen; \
+    locale-gen; \
+    echo 'LANG=C.UTF-8' >> /etc/environment; \
     rm -rf /var/lib/apt/lists/*
 
 # ---------- 2. Node.js + npm (NodeSource) ----------
