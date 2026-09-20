@@ -194,8 +194,8 @@ RUN set -eux; \
 # 版本断言看已装包的 package.json。1.1.0 起 `agent-anywhere --version` 也是真的了
 # （之前是 cli.ts 里硬编码的 0.2.0，拿它断言会永远"通过"），但读 package.json 仍然更直接：
 # 断言的是"装进镜像的那个包"，不经过 CLI 启动路径。
-ARG AGENT_ANYWHERE_VERSION=1.21.0
-ARG AGENT_ANYWHERE_SHA256=3651d5bbcd86e17d51c4a5bf56a48ac86e9fcea96b3f718c4e75e83c2305f856
+ARG AGENT_ANYWHERE_VERSION=1.22.0
+ARG AGENT_ANYWHERE_SHA256=64ab191a9a1abf99a25e4c4ff094c322b7d59dfa102c4adeafe3434da6cb6125
 RUN set -eux; \
     curl -fsSL -o /tmp/aa.tgz \
         "https://github.com/noir017/agent-anywhere/releases/download/v${AGENT_ANYWHERE_VERSION}/agent-anywhere-cli-${AGENT_ANYWHERE_VERSION}.tgz"; \
