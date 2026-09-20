@@ -85,14 +85,30 @@ RUN set -eux; \
     go version
 
 # ---------- 5. AI CLI（npm 全局，落在 /usr/lib/node_modules）----------
+#
+# codex 这一对必须同命令、同版本地装，否则镜像里会有两份 codex。
+# @agentclientprotocol/codex-acp 是 agent-anywhere 的 harness=codex 启动的 ACP 适配器
+# （替代已废弃的 @zed-industries/codex-acp），它把 @openai/codex 声明成普通依赖，
+# 而 npm 对 0.x 版本的 caret 是锁次版本号的：^0.154.0 等价于 >=0.154.0 <0.155.0。
+# 所以顶层若是 0.155.x，codex-acp 会在自己的 node_modules 里再嵌一份 0.154 的
+# @openai/codex —— 连同它 ~284 MB 的平台二进制。实测：钉 0.154.0 去重后
+# /usr/lib/node_modules 是 301 MB，不钉是 613 MB。
+#
+# 因此 CODEX_VERSION 不是"想用哪个版本"，而是"codex-acp 依赖哪个版本"。升级
+# codex-acp 时必须回来同步它，下面的断言会在版本漂移时让构建当场失败，而不是
+# 悄悄把镜像撑大 300 MB。
+ARG CODEX_VERSION=0.154.0
 RUN set -eux; \
     npm install -g \
         --allow-scripts=opencode-ai,@anthropic-ai/claude-code,@openai/codex \
         opencode-ai \
         @anthropic-ai/claude-code \
-        @openai/codex; \
+        "@openai/codex@${CODEX_VERSION}" \
+        @agentclientprotocol/codex-acp; \
     npm cache clean --force; \
-    opencode --version; claude --version; codex --version
+    test ! -e /usr/lib/node_modules/@agentclientprotocol/codex-acp/node_modules/@openai \
+        || { echo "codex-acp nested its own @openai/codex — bump CODEX_VERSION to match its dependency range" >&2; exit 1; }; \
+    opencode --version; claude --version; codex --version; codex-acp --version
 
 # ---------- 6. 用户 user（可 sudo）----------
 RUN set -eux; \
@@ -233,6 +249,25 @@ RUN set -eux; \
     cp /opt/dsh-config/cordis.patch.yml /opt/home-skel/.dsh/cordis.patch.yml; \
     chown -R ${USERNAME}:${USERNAME} /opt/home-skel/.dsh; \
     rm -rf /opt/dsh-config
+
+# ---------- 12c. Codex 预置配置（~/.codex）----------
+# 与 12b 的 dsh 同构、同理由：预置连到容器内 newapi 网关的 provider 配置，走
+# /opt/home-skel 播种。~/.codex 同时还是 codex 自己放 skills、会话状态与（若改用
+# ChatGPT 登录时的）auth.json 的地方，所以属主必须是 user。
+#
+# 一个必须说清的限制：entrypoint 的播种是"目标不存在才补"，粒度是家目录下的
+# 顶层条目。任何已经跑过 codex 的机器上 ~/.codex 都已存在（哪怕只有 skills/），
+# 于是整个 .codex 会被跳过，这份 config.toml 到不了那里。对那些机器这是**手工
+# 一次性动作**，不是镜像能代劳的 —— 照抄 codex/config.toml 即可。
+COPY codex/config.toml /opt/codex-config/config.toml
+RUN set -eux; \
+    install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.codex; \
+    cp /opt/codex-config/config.toml /home/${USERNAME}/.codex/config.toml; \
+    chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.codex; \
+    install -d -o ${USERNAME} -g ${USERNAME} /opt/home-skel/.codex; \
+    cp /opt/codex-config/config.toml /opt/home-skel/.codex/config.toml; \
+    chown -R ${USERNAME}:${USERNAME} /opt/home-skel/.codex; \
+    rm -rf /opt/codex-config
 
 # 守护脚本放最后：改脚本不触发上面的下载层。
 COPY bin/agent-anywhere-daemon.sh /usr/local/bin/agent-anywhere-daemon.sh
