@@ -19,7 +19,8 @@
 | Node.js 24 + npm | `/usr/bin/node` | NodeSource 官方源 |
 | opencode | `opencode` | npm `opencode-ai` |
 | Claude Code | `claude` | npm `@anthropic-ai/claude-code` |
-| Codex CLI | `codex` | npm `@openai/codex` |
+| Codex CLI | `codex` | npm `@openai/codex`，**版本钉死**（`CODEX_VERSION`，当前 0.154.0）—— 见下一行为何不能随便升 |
+| codex-acp | `codex-acp` | npm `@agentclientprotocol/codex-acp`，agent-anywhere `harness: codex` 启动的 ACP 适配器。它把 `@openai/codex` 声明成普通依赖，而 npm 对 0.x 的 caret 锁次版本号（`^0.154.0` = `<0.155.0`），所以顶层 codex 版本一旦对不上，就会在它的 `node_modules` 里再嵌一份 ~284 MB 的 codex。构建层有断言会在漂移时直接失败。连 newapi 网关的配置预置在 `~/.codex/config.toml` |
 | Antigravity CLI | `agy` | 官方安装脚本，装在 `/usr/local/bin`，属主 `user`（便于自更新） |
 | agyacct | `agyacct` | agy 的多 Google 账号切换器（本仓库 `bin/agyacct`）。见「agy 多账号切换」一节 |
 | Go | `/usr/local/go/bin/go` | 官方 tarball（`GO_VERSION` ARG，当前 1.27.0），`go`/`gofmt` 已软链进 `/usr/local/bin` |
@@ -76,8 +77,13 @@ uniagent --workspace        # 落到 ~/workspace
 ~13s 才重新注册。包装脚本走 docker exec，冷容器到拿到 shell 实测 1.2s。
 热连两条路差 170ms（直连 690ms / 包装 861ms），确定容器在跑时可以直接 `ssh uniagent`。
 
-各 CLI 首次使用需自行登录（`claude`、`codex login`、`opencode auth login`、`agy`），
+各 CLI 首次使用需自行登录（`claude`、`opencode auth login`、`agy`），
 凭据写在 `/home/user` 下，已持久化。SSH 会话里 `agy` 会打印授权 URL，在本地浏览器打开即可。
+
+`codex` 是例外，不需要 `codex login`：预置的 `~/.codex/config.toml` 把它指向容器内的
+newapi 网关，key 从 agent-anywhere 的 `.env` 经 `OPENAI_API_KEY` 注入（与 `dsh` 同一把）。
+想改回 ChatGPT 订阅登录就删掉那份 config.toml 再 `codex login` —— 但那要交互式浏览器授权，
+无头容器里做不了。
 
 ### agy 多账号切换：`agyacct`
 
