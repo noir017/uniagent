@@ -334,6 +334,10 @@ platforms:
     terminal:
       enabled: true
       socket: /home/user/.config/agent-anywhere/webui-term.sock   # 必须和 ② 一致
+      # 窗口右上角的「关闭」（agent-anywhere 1.26.0 起）。不配就只有最小化，没有关闭
+      # 按钮 —— daemon 不知道后端是 tmux，也不该知道，所以「怎么结束一个会话」只能由
+      # 这边说。必须和 aa-terminal.sh 里的 -L aa-web / aa-<topic> 对上。
+      endCommand: ["tmux", "-L", "aa-web", "kill-session", "-t", "aa-{topic}"]
 ```
 
 ```yaml
@@ -343,6 +347,10 @@ environment:
 ```
 
 只开 ① 不会静默失败：按钮在、后端没起，代理明确回 502「terminal backend is not running」。
+
+终端是**每个话题一个窗口**：最小化只收起窗口，iframe 还挂着、连接不断，tmux 里跑的东西
+照常跑，话题列表上那个 `>_` 标记也还亮着；关闭才会跑 `endCommand` 真的 kill 掉会话。那个
+标记数的是「有页面连着」，不是「tmux 里有东西在跑」—— 关掉所有标签页，标记全灭，会话照跑。
 
 **组成**
 
