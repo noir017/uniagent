@@ -98,17 +98,7 @@ RUN set -eux; \
 # codex-acp 时必须回来同步它，下面的断言会在版本漂移时让构建当场失败，而不是
 # 悄悄把镜像撑大 300 MB。
 ARG CODEX_VERSION=0.154.0
-RUN set -eux; \
-    npm install -g \
-        --allow-scripts=opencode-ai,@anthropic-ai/claude-code,@openai/codex \
-        opencode-ai \
-        @anthropic-ai/claude-code \
-        "@openai/codex@${CODEX_VERSION}" \
-        @agentclientprotocol/codex-acp; \
-    npm cache clean --force; \
-    test ! -e /usr/lib/node_modules/@agentclientprotocol/codex-acp/node_modules/@openai \
-        || { echo "codex-acp nested its own @openai/codex — bump CODEX_VERSION to match its dependency range" >&2; exit 1; }; \
-    opencode --version; claude --version; codex --version; codex-acp --version
+# 安装命令已拆到 agents/node-agents.sh，见下面"agents 组合层"（按 AGENTS 按需安装）。
 
 # ---------- 6. 用户 user（可 sudo）----------
 RUN set -eux; \
@@ -120,14 +110,7 @@ RUN set -eux; \
     install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.local/bin /home/${USERNAME}/workspace
 
 # ---------- 7. Antigravity CLI (agy) ----------
-# 装到 /usr/local/bin 以免被 /home/user 的 bind mount 遮蔽；
-# 属主给 user，保证 agy 后台自更新可写。
-RUN set -eux; \
-    curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh; \
-    bash /tmp/agy-install.sh --dir /usr/local/bin; \
-    rm -f /tmp/agy-install.sh; \
-    chown ${USERNAME}:${USERNAME} /usr/local/bin/agy; \
-    /usr/local/bin/agy --version || true
+# 安装命令已拆到 agents/agy.sh，见下面"agents 组合层"（按 AGENTS 按需安装）。
 
 # ---------- 8. 环境与骨架 ----------
 RUN set -eux; \
@@ -178,96 +161,61 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     gh --version
 
-# ---------- 11. agent-anywhere（IM 网关：Telegram ↔ claude/opencode/…）----------
-# 装的是 GitHub Release 里的 tarball，不是 npm 上的包：npm 上的 agent-anywhere-cli
-# 归上游所有，本仓库这条线的版本只在 Release 上发。该 tarball 由 agent-anywhere 的
-# release.yml 在 Actions 里跑完 typecheck/lint/test/build 后 npm pack 产出，
-# 与 npm publish 出来的字节一致。
-#
-# 单独最后一层：升版本只重建这一层，前面 Node / 各 AI CLI 全走缓存。
-# 升级方法：改下面两个 ARG（版本 + 校验和，校验和取 Release 里的 SHA256SUMS），
-# 推 main 即可，CI 会重新编译发布。
-#
-# 装到 /usr（npm prefix 就是 /usr）而不是 /home/user：后者是 bind mount，
-# 会被宿主机目录整个遮蔽，程序就又变成"挂载里的临时文件"了 —— 那正是这一层要消灭的状态。
-#
-# 版本断言看已装包的 package.json。1.1.0 起 `agent-anywhere --version` 也是真的了
-# （之前是 cli.ts 里硬编码的 0.2.0，拿它断言会永远"通过"），但读 package.json 仍然更直接：
-# 断言的是"装进镜像的那个包"，不经过 CLI 启动路径。
+# ---------- 11. agents 组合层（按 AGENTS 按需安装）----------
+#   全量：  --build-arg AGENTS="node-agents,agy,agent-anywhere,dsh"
+#   精简：  --build-arg AGENTS="node-agents"          # 不要 dsh 省 ~294MB
+# 每个 agent 独立一层：升级 dsh 只重建 dsh 层，前面全走缓存。
+# 版本 ARG 留在 Dockerfile（供 bump-agent-anywhere.yml sed 改写），以环境变量透给脚本。
+ARG AGENTS="node-agents,agy,agent-anywhere,dsh"
 ARG AGENT_ANYWHERE_VERSION=1.22.0
 ARG AGENT_ANYWHERE_SHA256=64ab191a9a1abf99a25e4c4ff094c322b7d59dfa102c4adeafe3434da6cb6125
-RUN set -eux; \
-    curl -fsSL -o /tmp/aa.tgz \
-        "https://github.com/noir017/agent-anywhere/releases/download/v${AGENT_ANYWHERE_VERSION}/agent-anywhere-cli-${AGENT_ANYWHERE_VERSION}.tgz"; \
-    echo "${AGENT_ANYWHERE_SHA256}  /tmp/aa.tgz" | sha256sum -c -; \
-    npm install -g /tmp/aa.tgz; \
-    rm -f /tmp/aa.tgz; \
-    npm cache clean --force; \
-    installed="$(node -p "require('/usr/lib/node_modules/agent-anywhere-cli/package.json').version")"; \
-    test "${installed}" = "${AGENT_ANYWHERE_VERSION}"; \
-    echo "agent-anywhere ${installed} installed at $(command -v agent-anywhere)"; \
-    agent-anywhere --help > /dev/null
-
-# ---------- 12. DeepSeek Harness (dsh) ----------
-# DeepSeek 官方的 harness CLI（headless / acp / web 等 profile）。装的是 npm 包
-# @deepseek-ai/dsh（上游发布，版本钉在 DSH_VERSION），装出 /usr/bin/dsh。
-#
-# 放在 agent-anywhere 之后、各 COPY 脚本层之前：升级 dsh 只重建这一层 + 后面几个
-# 轻量 COPY 层，前面的 Node / 各 AI CLI / Go / agent-anywhere 全走缓存。
-# 装到 /usr（npm prefix 就是 /usr）而不是 /home/user：后者是 bind mount，会被
-# 宿主机目录整个遮蔽（与 agent-anywhere 同一理由）。
-#
-# 版本断言读已装包的 package.json（断言"装进镜像的那个包"），不依赖 CLI 启动路径。
 ARG DSH_VERSION=0.1.2-rc.1
-RUN set -eux; \
-    npm install -g "@deepseek-ai/dsh@${DSH_VERSION}"; \
-    npm cache clean --force; \
-    installed="$(node -p "require('/usr/lib/node_modules/@deepseek-ai/dsh/package.json').version")"; \
-    test "${installed}" = "${DSH_VERSION}"; \
-    echo "dsh ${installed} installed at $(command -v dsh)"; \
-    dsh --version > /dev/null
-
-# ---------- 12b. DSH 预置配置（~/.dsh）----------
-# 预置连到容器内 newapi 网关的 provider 配置（settings.yaml）与全局 patch 层
-# （cordis.patch.yml）。内容就是"已验证有效"的那份，一字不差。
-#
-# ~/.dsh 是配置不是代码，按本镜像惯例走 /opt/home-skel 播种：首次挂载空的
-# /home/user 时 entrypoint 会把它补进挂载卷；已存在的机器不覆盖（~/.dsh 在挂载卷里，
-# 重启/重建镜像都不丢）。所以同一层同时写进 /home/user/.dsh（镜像内自包含）和
-# /opt/home-skel/.dsh（播种源）。属主给 user：dsh 首次启动要在 ~/.dsh 下建
-# profiles / sessions / storages。
-#
-# 放最后：改这份配置只重建这一层，不触发前面的下载层。
+COPY agents/ /opt/agents/
 COPY dsh/settings.yaml dsh/cordis.patch.yml /opt/dsh-config/
-RUN set -eux; \
-    install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.dsh; \
-    cp /opt/dsh-config/settings.yaml /home/${USERNAME}/.dsh/settings.yaml; \
-    cp /opt/dsh-config/cordis.patch.yml /home/${USERNAME}/.dsh/cordis.patch.yml; \
-    chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.dsh; \
-    install -d -o ${USERNAME} -g ${USERNAME} /opt/home-skel/.dsh; \
-    cp /opt/dsh-config/settings.yaml /opt/home-skel/.dsh/settings.yaml; \
-    cp /opt/dsh-config/cordis.patch.yml /opt/home-skel/.dsh/cordis.patch.yml; \
-    chown -R ${USERNAME}:${USERNAME} /opt/home-skel/.dsh; \
-    rm -rf /opt/dsh-config
-
-# ---------- 12c. Codex 预置配置（~/.codex）----------
-# 与 12b 的 dsh 同构、同理由：预置连到容器内 newapi 网关的 provider 配置，走
-# /opt/home-skel 播种。~/.codex 同时还是 codex 自己放 skills、会话状态与（若改用
-# ChatGPT 登录时的）auth.json 的地方，所以属主必须是 user。
-#
-# 一个必须说清的限制：entrypoint 的播种是"目标不存在才补"，粒度是家目录下的
-# 顶层条目。任何已经跑过 codex 的机器上 ~/.codex 都已存在（哪怕只有 skills/），
-# 于是整个 .codex 会被跳过，这份 config.toml 到不了那里。对那些机器这是**手工
-# 一次性动作**，不是镜像能代劳的 —— 照抄 codex/config.toml 即可。
 COPY codex/config.toml /opt/codex-config/config.toml
 RUN set -eux; \
-    install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.codex; \
-    cp /opt/codex-config/config.toml /home/${USERNAME}/.codex/config.toml; \
-    chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.codex; \
-    install -d -o ${USERNAME} -g ${USERNAME} /opt/home-skel/.codex; \
-    cp /opt/codex-config/config.toml /opt/home-skel/.codex/config.toml; \
-    chown -R ${USERNAME}:${USERNAME} /opt/home-skel/.codex; \
-    rm -rf /opt/codex-config
+    IFS=',' read -ra L <<< "${AGENTS}"; \
+    for a in "${L[@]}"; do \
+        case "$a" in \
+            node-agents|agy|agent-anywhere|dsh) ;; \
+            *) echo "unknown agent in AGENTS: $a (want: node-agents,agy,agent-anywhere,dsh)" >&2; exit 1 ;; \
+        esac; \
+    done
+RUN set -eux; \
+    case ",${AGENTS}," in *,node-agents,*) \
+        export CODEX_VERSION; bash /opt/agents/node-agents.sh ;; \
+    esac; \
+    npm cache clean --force
+RUN set -eux; \
+    case ",${AGENTS}," in *,agy,*) \
+        export USERNAME; bash /opt/agents/agy.sh ;; \
+    esac
+RUN set -eux; \
+    case ",${AGENTS}," in *,agent-anywhere,*) \
+        export AGENT_ANYWHERE_VERSION AGENT_ANYWHERE_SHA256; bash /opt/agents/agent-anywhere.sh ;; \
+    esac; \
+    npm cache clean --force
+RUN set -eux; \
+    case ",${AGENTS}," in *,dsh,*) \
+        export DSH_VERSION; bash /opt/agents/dsh.sh ;; \
+    esac; \
+    npm cache clean --force; \
+    rm -rf /opt/agents
+# 预置配置跟随 agent 走：没选 dsh 就不播种 ~/.dsh，没选 node-agents 就不播种 ~/.codex。
+RUN set -eux; \
+    case ",${AGENTS}," in *,dsh,*) \
+        install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.dsh /opt/home-skel/.dsh; \
+        cp /opt/dsh-config/settings.yaml /opt/dsh-config/cordis.patch.yml /home/${USERNAME}/.dsh/; \
+        cp /opt/dsh-config/settings.yaml /opt/dsh-config/cordis.patch.yml /opt/home-skel/.dsh/; \
+        chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.dsh /opt/home-skel/.dsh ;; \
+    esac; \
+    case ",${AGENTS}," in *,node-agents,*) \
+        install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.codex /opt/home-skel/.codex; \
+        cp /opt/codex-config/config.toml /home/${USERNAME}/.codex/config.toml; \
+        cp /opt/codex-config/config.toml /opt/home-skel/.codex/config.toml; \
+        chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.codex /opt/home-skel/.codex ;; \
+    esac; \
+    rm -rf /opt/dsh-config /opt/codex-config
 
 # 守护脚本放最后：改脚本不触发上面的下载层。
 COPY bin/agent-anywhere-daemon.sh /usr/local/bin/agent-anywhere-daemon.sh
