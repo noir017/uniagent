@@ -174,10 +174,11 @@ COPY agents/ /opt/agents/
 COPY dsh/settings.yaml dsh/cordis.patch.yml /opt/dsh-config/
 COPY codex/config.toml /opt/codex-config/config.toml
 RUN set -eux; \
-    IFS=',' read -ra L <<< "${AGENTS}"; \
-    for a in "${L[@]}"; do \
-        case "$a" in \
-            node-agents|agy|agent-anywhere|dsh) ;; \
+    rest="${AGENTS},"; \
+    while [ -n "${rest}" ]; do \
+        a="${rest%%,*}"; rest="${rest#*,}"; \
+        case ",node-agents,agy,agent-anywhere,dsh," in \
+            *,"${a}",*) ;; \
             *) echo "unknown agent in AGENTS: $a (want: node-agents,agy,agent-anywhere,dsh)" >&2; exit 1 ;; \
         esac; \
     done
