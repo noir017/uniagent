@@ -197,8 +197,8 @@ RUN set -eux; \
 # 每个 agent 独立一层：升级 dsh 只重建 dsh 层，前面全走缓存。
 # 版本 ARG 留在 Dockerfile（供 bump-agent-anywhere.yml sed 改写），以环境变量透给脚本。
 ARG AGENTS="node-agents,agy,agent-anywhere,dsh"
-ARG AGENT_ANYWHERE_VERSION=1.24.0
-ARG AGENT_ANYWHERE_SHA256=9a5bcbc51f89dd1e19a2fef41eda7404b9005feb196503d3daf964b5b690106f
+ARG AGENT_ANYWHERE_VERSION=1.25.0
+ARG AGENT_ANYWHERE_SHA256=8d0e04e9d2ce7620d66a6efb4a85239d7633c2145f4b7809ee421e9d8d28b459
 ARG DSH_VERSION=0.1.2-rc.1
 COPY agents/ /opt/agents/
 COPY dsh/settings.yaml dsh/cordis.patch.yml /opt/dsh-config/
