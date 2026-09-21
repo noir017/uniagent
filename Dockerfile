@@ -148,6 +148,36 @@ RUN set -eux; \
 COPY entrypoint.sh /usr/local/sbin/entrypoint.sh
 RUN chmod +x /usr/local/sbin/entrypoint.sh
 
+# ---------- 9b. ttyd：agent-anywhere webui 终端面板的后端 ----------
+#
+# 网页里那个终端不是 agent-anywhere 自己实现的 —— 它只做一层过 session cookie 的反向代理，
+# 真正的 PTY 在这里。这么分是为了让 agent-anywhere 一个原生依赖都不用加：自己实现要引
+# node-pty（**它的 tarball 里只有 darwin 和 win32 的 prebuild，Linux 一个都没有**，等于
+# 所有 Linux 安装都要现场编译）、xterm.js、WebSocket 服务端，外加 scrollback / resize /
+# 重连 / 手机软键盘。ttyd 是 1.3MB 静态二进制，这些连同 CJK 与 IME 支持全都现成。
+#
+# Debian bookworm 源里没有 ttyd（只在 sid），所以走 release 静态二进制，和上面 Go、
+# teleport 同一个路子。校验和逐架构写死：改版本必须同时改这两行，否则构建当场失败，而不是
+# 悄悄装上一个没人核对过的二进制。
+ARG TTYD_VERSION=1.7.7
+ARG TTYD_SHA256_AMD64=8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55
+ARG TTYD_SHA256_ARM64=b38acadd89d1d396a0f5649aa52c539edbad07f4bc7348b27b4f4b7219dd4165
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) asset=ttyd.x86_64;  sum="${TTYD_SHA256_AMD64}" ;; \
+        arm64) asset=ttyd.aarch64; sum="${TTYD_SHA256_ARM64}" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/${asset}" \
+        -o /usr/local/bin/ttyd; \
+    echo "${sum}  /usr/local/bin/ttyd" | sha256sum -c -; \
+    chmod +x /usr/local/bin/ttyd; \
+    ttyd --version
+COPY bin/aa-terminal.sh /usr/local/bin/aa-terminal.sh
+COPY aa-terminal.tmux.conf /usr/local/etc/aa-terminal.tmux.conf
+RUN chmod +x /usr/local/bin/aa-terminal.sh
+
 # ---------- 10. GitHub CLI (gh) ----------
 # 单独最后一层：升级/重装 gh 只重建这一层，前面全部走缓存。
 # 认证数据落在 /home/user/.config/gh/（bind mount），重建不丢。

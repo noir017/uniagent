@@ -21,6 +21,13 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - USERNAME=user
+      # agent-anywhere webui 的终端面板后端（ttyd）。默认不起。
+      #
+      # 打开它等于把容器里的一个 shell 挂在 webui 的登录 token 后面 —— 权限上限没变
+      # （智能体本来就是全工具权限），但从 token 泄漏到任意命令的距离短得多。所以它和
+      # config.yaml 里的 platforms.<id>.terminal.enabled 是两个开关：那个说页面上要不要
+      # 有按钮，这个说容器里要不要真的跑起那个 shell 服务。
+      # - UNIAGENT_WEB_TERMINAL=1
     volumes:
       # user 家目录持久化到宿主机。agent-anywhere 的配置与状态也在这里
       # （home/.config/agent-anywhere/：config.yaml、.env、conversations.json、
