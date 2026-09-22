@@ -19,7 +19,7 @@ on:
   push:
     branches: [main]
     # 只改文档不重建：这个镜像单架构要十几分钟，两架构更久。
-    # 镜像内容只取决于 Dockerfile、entrypoint.sh、bin/、agents/、mcp/、dsh/ 与
+    # 镜像内容只取决于 Dockerfile、entrypoint.sh、bin/、agents/、mcp/ 与
     # codex/（都会被 COPY 进去；判断标准就是 Dockerfile 里的 COPY 行，加 COPY 时记得同步这里），
     # 其余文件（compose、ua/uniagent 包装脚本、ssh/teleport 配置）都是宿主侧的，不进镜像。
     paths-ignore:
@@ -27,8 +27,8 @@ on:
       - 'LICENSE'
       - '.gitignore'
       # 宿主侧的文件（上面那段列的那些）：只有 Dockerfile / entrypoint.sh / bin/ /
-      # agents/ / mcp/ / dsh/ / codex/ 会进镜像，改这些等两架构重编一遍纯属白等。
-      # 别把 agents/、mcp/、dsh/、codex/ 加进这个名单：它们是 COPY 进去的，忽略掉会让
+      # agents/ / mcp/ / codex/ 会进镜像，改这些等两架构重编一遍纯属白等。
+      # 别把 agents/、mcp/、codex/ 加进这个名单：它们是 COPY 进去的，忽略掉会让
       # 改了也不重编，GHCR 上的镜像静默停在旧版本，且不报任何错。
       - 'uniagent'
       - 'ua'
