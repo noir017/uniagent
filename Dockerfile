@@ -98,7 +98,8 @@ RUN set -eux; \
 # codex-acp 时必须回来同步它，下面的断言会在版本漂移时让构建当场失败，而不是
 # 悄悄把镜像撑大 300 MB。
 ARG CODEX_VERSION=0.154.0
-# 安装命令已拆到 agents/node-agents.sh，见下面"agents 组合层"（按 AGENTS 按需安装）。
+# 安装命令已拆到 agents/opencode.sh、agents/claude.sh、agents/codex.sh，
+# 见下面"agents 组合层"（按 AGENTS 按需安装）。
 
 # ---------- 6. 用户 user（可 sudo）----------
 RUN set -eux; \
@@ -192,11 +193,12 @@ RUN set -eux; \
     gh --version
 
 # ---------- 11. agents 组合层（按 AGENTS 按需安装）----------
-#   全量：  --build-arg AGENTS="node-agents,agy,agent-anywhere,dsh"
-#   精简：  --build-arg AGENTS="node-agents"          # 不要 dsh 省 ~294MB
+#   全量：  --build-arg AGENTS="opencode,claude,codex,agy,agent-anywhere,dsh"
+#   精简：  --build-arg AGENTS="opencode,claude"    # 不要 dsh 省 ~294MB
 # 每个 agent 独立一层：升级 dsh 只重建 dsh 层，前面全走缓存。
+# 只有 codex 例外：codex 与 codex-acp 必须同装（见 agents/codex.sh），故合并为一个 token。
 # 版本 ARG 留在 Dockerfile（供 bump-agent-anywhere.yml sed 改写），以环境变量透给脚本。
-ARG AGENTS="node-agents,agy,agent-anywhere,dsh"
+ARG AGENTS="opencode,claude,codex,agy,agent-anywhere,dsh"
 ARG AGENT_ANYWHERE_VERSION=1.26.0
 ARG AGENT_ANYWHERE_SHA256=a64b2408a602db50811d554b58860c0156fc97f3514c36d582f5c14048b54329
 ARG DSH_VERSION=0.1.2-rc.1
@@ -207,14 +209,24 @@ RUN set -eux; \
     rest="${AGENTS},"; \
     while [ -n "${rest}" ]; do \
         a="${rest%%,*}"; rest="${rest#*,}"; \
-        case ",node-agents,agy,agent-anywhere,dsh," in \
+        case ",opencode,claude,codex,agy,agent-anywhere,dsh," in \
             *,"${a}",*) ;; \
-            *) echo "unknown agent in AGENTS: $a (want: node-agents,agy,agent-anywhere,dsh)" >&2; exit 1 ;; \
+            *) echo "unknown agent in AGENTS: $a (want: opencode,claude,codex,agy,agent-anywhere,dsh)" >&2; exit 1 ;; \
         esac; \
     done
 RUN set -eux; \
-    case ",${AGENTS}," in *,node-agents,*) \
-        export CODEX_VERSION; bash /opt/agents/node-agents.sh ;; \
+    case ",${AGENTS}," in *,opencode,*) \
+        bash /opt/agents/opencode.sh ;; \
+    esac; \
+    npm cache clean --force
+RUN set -eux; \
+    case ",${AGENTS}," in *,claude,*) \
+        bash /opt/agents/claude.sh ;; \
+    esac; \
+    npm cache clean --force
+RUN set -eux; \
+    case ",${AGENTS}," in *,codex,*) \
+        export CODEX_VERSION; bash /opt/agents/codex.sh ;; \
     esac; \
     npm cache clean --force
 RUN set -eux; \
@@ -232,7 +244,7 @@ RUN set -eux; \
     esac; \
     npm cache clean --force; \
     rm -rf /opt/agents
-# 预置配置跟随 agent 走：没选 dsh 就不播种 ~/.dsh，没选 node-agents 就不播种 ~/.codex。
+# 预置配置跟随 agent 走：没选 dsh 就不播种 ~/.dsh，没选 codex 就不播种 ~/.codex。
 RUN set -eux; \
     case ",${AGENTS}," in *,dsh,*) \
         install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.dsh /opt/home-skel/.dsh; \
@@ -240,7 +252,7 @@ RUN set -eux; \
         cp /opt/dsh-config/settings.yaml /opt/dsh-config/cordis.patch.yml /opt/home-skel/.dsh/; \
         chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.dsh /opt/home-skel/.dsh ;; \
     esac; \
-    case ",${AGENTS}," in *,node-agents,*) \
+    case ",${AGENTS}," in *,codex,*) \
         install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.codex /opt/home-skel/.codex; \
         cp /opt/codex-config/config.toml /home/${USERNAME}/.codex/config.toml; \
         cp /opt/codex-config/config.toml /opt/home-skel/.codex/config.toml; \
