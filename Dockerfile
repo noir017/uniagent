@@ -228,7 +228,7 @@ RUN set -eux; \
     esac
 RUN set -eux; \
     case ",${AGENTS}," in *,agent-anywhere,*) \
-        export AGENT_ANYWHERE_VERSION AGENT_ANYWHERE_SHA256; bash /opt/agents/agent-anywhere.sh ;; \
+        export AGENT_ANYWHERE_VERSION AGENT_ANYWHERE_SHA256 AGENTS; bash /opt/agents/agent-anywhere.sh ;; \
     esac; \
     npm cache clean --force
 # 预置配置跟随 agent 走：没选 codex 就不播种 ~/.codex。
