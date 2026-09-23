@@ -39,6 +39,18 @@ SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 # pgrep/pkill would find itself and (worse) kill the calling shell.
 PATTERN="$BIN start"
 
+# The claude harness runs the Claude Code CLI through the Agent SDK, and the SDK
+# ships its own ~222 MB copy of that CLI as optional deps. agents/agent-anywhere.sh
+# installs without them (the global `claude` is the same binary — verified with
+# cmp at 2.1.280), so the SDK has to be told where the one that is left lives;
+# without this every cc turn fails with "Claude native binary not found".
+# Only set when the file is really there: pointing the SDK at a missing path
+# would turn a clear error into a confusing ENOENT. An explicit value wins.
+CLAUDE_GLOBAL_EXE="/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+if [ -z "${CLAUDE_CODE_EXECUTABLE:-}" ] && [ -x "$CLAUDE_GLOBAL_EXE" ]; then
+    export CLAUDE_CODE_EXECUTABLE="$CLAUDE_GLOBAL_EXE"
+fi
+
 MIN_BACKOFF=5
 MAX_BACKOFF=300
 
