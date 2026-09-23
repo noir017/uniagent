@@ -89,15 +89,18 @@ RUN set -eux; \
 # codex 这一对必须同命令、同版本地装，否则镜像里会有两份 codex。
 # @agentclientprotocol/codex-acp 是 agent-anywhere 的 harness=codex 启动的 ACP 适配器
 # （替代已废弃的 @zed-industries/codex-acp），它把 @openai/codex 声明成普通依赖，
-# 而 npm 对 0.x 版本的 caret 是锁次版本号的：^0.155.1 等价于 >=0.155.1 <0.156.0。
-# 所以顶层若是 0.156.x，codex-acp 会在自己的 node_modules 里再嵌一份 0.155 的
-# @openai/codex —— 连同它 ~284 MB 的平台二进制。实测：钉 0.155.1 去重后
+# 而 npm 对 0.x 版本的 caret 是锁次版本号的：^0.156.1 等价于 >=0.156.1 <0.157.0。
+# 所以顶层若是别的次版本，codex-acp 会在自己的 node_modules 里再嵌一份匹配的
+# @openai/codex —— 连同它 ~284 MB 的平台二进制。实测（0.155.1 那一代）：去重后
 # /usr/lib/node_modules 是 301 MB，不钉是 613 MB。
 #
 # 因此 CODEX_VERSION 不是"想用哪个版本"，而是"codex-acp 依赖哪个版本"。升级
 # codex-acp 时必须回来同步它，下面的断言会在版本漂移时让构建当场失败，而不是
 # 悄悄把镜像撑大 300 MB。
-ARG CODEX_VERSION=0.155.1
+#
+# 0.156.1：codex-acp 1.13.1（2026-09-23）把依赖改成了 ^0.156.1，0.155.1 从那一刻起
+# 每次构建都挂在断言上。0.156.1 + codex-acp 1.13.1 已在临时 prefix 里实测装出单份 codex。
+ARG CODEX_VERSION=0.156.1
 # 安装命令已拆到 agents/opencode.sh、agents/claude.sh、agents/codex.sh，
 # 见下面"agents 组合层"（按 AGENTS 按需安装）。
 
