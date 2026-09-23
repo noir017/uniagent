@@ -199,6 +199,7 @@ RUN set -eux; \
 # 只有 codex 例外：codex 与 codex-acp 必须同装（见 agents/codex.sh），故合并为一个 token。
 # 版本 ARG 留在 Dockerfile（供 bump-agent-anywhere.yml sed 改写），以环境变量透给脚本。
 ARG AGENTS="opencode,claude,codex,agy,agent-anywhere"
+ARG CLAUDE_CODE_VERSION=latest
 ARG AGENT_ANYWHERE_VERSION=1.28.0
 ARG AGENT_ANYWHERE_SHA256=69affc864021ed794153dfeac61592f1ff96589345c83817d7dc001fe5e9e3a2
 COPY agents/ /opt/agents/
@@ -219,7 +220,7 @@ RUN set -eux; \
     npm cache clean --force
 RUN set -eux; \
     case ",${AGENTS}," in *,claude,*) \
-        bash /opt/agents/claude.sh ;; \
+        export CLAUDE_CODE_VERSION; bash /opt/agents/claude.sh ;; \
     esac; \
     npm cache clean --force
 RUN set -eux; \

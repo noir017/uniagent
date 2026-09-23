@@ -65,9 +65,20 @@ permissions:
   contents: read
 
 jobs:
+  resolve-claude-version:
+    name: Resolve Claude Code version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve npm latest
+        id: version
+        run: echo "version=$(npm view @anthropic-ai/claude-code version)" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    needs: resolve-claude-version
     outputs:
       # 矩阵里两个 job 都会写这个 output，后完成的覆盖先完成的 —— 两边算出来的值
       # 完全相同（同一个 ref 的 HEAD），所以覆盖无所谓。
@@ -128,6 +139,8 @@ jobs:
           context: .
           file: Dockerfile
           platforms: ${{ matrix.platform }}
+          build-args: |
+            CLAUDE_CODE_VERSION=${{ needs.resolve-claude-version.outputs.version }}
           labels: ${{ steps.meta.outputs.labels }}
           # scope 按架构分开，避免 amd64 和 arm64 互相覆盖。
           # Dockerfile 刻意把 Go / sshd / gh 拆成独立末层，缓存命中后改这些只重建一层。
@@ -157,7 +170,7 @@ jobs:
 
   merge:
     name: Merge and publish
-    needs: build
+    needs: [build, resolve-claude-version]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
