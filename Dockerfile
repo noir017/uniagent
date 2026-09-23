@@ -89,15 +89,15 @@ RUN set -eux; \
 # codex 这一对必须同命令、同版本地装，否则镜像里会有两份 codex。
 # @agentclientprotocol/codex-acp 是 agent-anywhere 的 harness=codex 启动的 ACP 适配器
 # （替代已废弃的 @zed-industries/codex-acp），它把 @openai/codex 声明成普通依赖，
-# 而 npm 对 0.x 版本的 caret 是锁次版本号的：^0.154.0 等价于 >=0.154.0 <0.155.0。
-# 所以顶层若是 0.155.x，codex-acp 会在自己的 node_modules 里再嵌一份 0.154 的
-# @openai/codex —— 连同它 ~284 MB 的平台二进制。实测：钉 0.154.0 去重后
+# 而 npm 对 0.x 版本的 caret 是锁次版本号的：^0.155.1 等价于 >=0.155.1 <0.156.0。
+# 所以顶层若是 0.156.x，codex-acp 会在自己的 node_modules 里再嵌一份 0.155 的
+# @openai/codex —— 连同它 ~284 MB 的平台二进制。实测：钉 0.155.1 去重后
 # /usr/lib/node_modules 是 301 MB，不钉是 613 MB。
 #
 # 因此 CODEX_VERSION 不是"想用哪个版本"，而是"codex-acp 依赖哪个版本"。升级
 # codex-acp 时必须回来同步它，下面的断言会在版本漂移时让构建当场失败，而不是
 # 悄悄把镜像撑大 300 MB。
-ARG CODEX_VERSION=0.154.0
+ARG CODEX_VERSION=0.155.1
 # 安装命令已拆到 agents/opencode.sh、agents/claude.sh、agents/codex.sh，
 # 见下面"agents 组合层"（按 AGENTS 按需安装）。
 
@@ -199,7 +199,6 @@ RUN set -eux; \
 # 只有 codex 例外：codex 与 codex-acp 必须同装（见 agents/codex.sh），故合并为一个 token。
 # 版本 ARG 留在 Dockerfile（供 bump-agent-anywhere.yml sed 改写），以环境变量透给脚本。
 ARG AGENTS="opencode,claude,codex,agy,agent-anywhere"
-ARG CLAUDE_CODE_VERSION=latest
 ARG AGENT_ANYWHERE_VERSION=1.28.0
 ARG AGENT_ANYWHERE_SHA256=69affc864021ed794153dfeac61592f1ff96589345c83817d7dc001fe5e9e3a2
 COPY agents/ /opt/agents/
@@ -219,11 +218,6 @@ RUN set -eux; \
     esac; \
     npm cache clean --force
 RUN set -eux; \
-    case ",${AGENTS}," in *,claude,*) \
-        export CLAUDE_CODE_VERSION; bash /opt/agents/claude.sh ;; \
-    esac; \
-    npm cache clean --force
-RUN set -eux; \
     case ",${AGENTS}," in *,codex,*) \
         export CODEX_VERSION; bash /opt/agents/codex.sh ;; \
     esac; \
@@ -236,8 +230,7 @@ RUN set -eux; \
     case ",${AGENTS}," in *,agent-anywhere,*) \
         export AGENT_ANYWHERE_VERSION AGENT_ANYWHERE_SHA256; bash /opt/agents/agent-anywhere.sh ;; \
     esac; \
-    npm cache clean --force; \
-    rm -rf /opt/agents
+    npm cache clean --force
 # 预置配置跟随 agent 走：没选 codex 就不播种 ~/.codex。
 RUN set -eux; \
     case ",${AGENTS}," in *,codex,*) \
@@ -247,6 +240,15 @@ RUN set -eux; \
         chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.codex /opt/home-skel/.codex ;; \
     esac; \
     rm -rf /opt/codex-config
+
+
+ARG CLAUDE_CODE_VERSION=latest
+RUN set -eux; \
+    case ",${AGENTS}," in *,claude,*) \
+        export CLAUDE_CODE_VERSION; bash /opt/agents/claude.sh ;; \
+    esac; \
+    npm cache clean --force; \
+    rm -rf /opt/agents
 
 # 守护脚本放最后：改脚本不触发上面的下载层。
 COPY bin/agent-anywhere-daemon.sh /usr/local/bin/agent-anywhere-daemon.sh
