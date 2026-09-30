@@ -89,7 +89,7 @@ RUN set -eux; \
 # codex 这一对必须同命令、同版本地装，否则镜像里会有两份 codex。
 # @agentclientprotocol/codex-acp 是 agent-anywhere 的 harness=codex 启动的 ACP 适配器
 # （替代已废弃的 @zed-industries/codex-acp），它把 @openai/codex 声明成普通依赖，
-# 而 npm 对 0.x 版本的 caret 是锁次版本号的：^0.158.0 等价于 >=0.158.0 <0.159.0。
+# 而 npm 对 0.x 版本的 caret 是锁次版本号的：^0.159.1 等价于 >=0.159.1 <0.160.0。
 # 所以顶层若是别的次版本，codex-acp 会在自己的 node_modules 里再嵌一份匹配的
 # @openai/codex —— 连同它 ~284 MB 的平台二进制。实测（0.155.1 那一代）：去重后
 # /usr/lib/node_modules 是 301 MB，不钉是 613 MB。
@@ -98,13 +98,16 @@ RUN set -eux; \
 # codex-acp 时必须回来同步它，下面的断言会在版本漂移时让构建当场失败，而不是
 # 悄悄把镜像撑大 300 MB。
 #
+# 0.159.2：codex-acp 2.0.1（2026-09-29，补丁版）把依赖改成了 ^0.159.1，0.158.0 从那一刻起
+# 同样挂在断言上（agent-anywhere 1.36.0、1.36.1 因此没进镜像）。0.159.2 + codex-acp 2.0.1
+# 已在临时 prefix 里实测装出单份 codex，并经 ACP 握手、建会话、跑一轮验证（2026-09-30）。
 # 0.158.0：codex-acp 2.0.0（2026-09-28，大版本号）把依赖改成了 ^0.158.0，
 # 0.156.1 从那一刻起每次构建都挂在断言上（agent-anywhere 1.34.2 因此没进镜像）。
 # 0.158.0 + codex-acp 2.0.0 已在临时 prefix 里实测装出单份 codex，并经 agent-anywhere
 # 的 cx 链路实跑：握手、模型/effort 上报、INITIAL_AGENT_MODE=agent-full-access 下执行
 # 命令、/model 与 /effort 的选项列表、连续两轮，均正常（2026-09-29）。
 # 更早：0.156.1 对 codex-acp 1.13.1（2026-09-23）。
-ARG CODEX_VERSION=0.158.0
+ARG CODEX_VERSION=0.159.2
 # 安装命令已拆到 agents/opencode.sh、agents/claude.sh、agents/codex.sh，
 # 见下面"agents 组合层"（按 AGENTS 按需安装）。
 
