@@ -182,13 +182,17 @@ agent 版本需 ≤ 集群 auth 版本；集群是 v18 时保持 `TELEPORT_CHANN
 镜像由 CI 编译发布到 GHCR（`.github/workflows/docker.yml`，amd64 + arm64），**部署侧不 build**：
 
 ```bash
-uniagent update              # 拉新镜像并重建；--dry-run 只拉不换，--force 无视占用
+uniagent update              # 拉新镜像、重建、清旧镜像；--dry-run 只拉不换，--force 无视占用
 ```
 
 `update` 比手敲两条命令多做的事，都是踩过才加的：镜像引用从 compose 里读（不写死，钉版本时
 跟着变）；比**镜像 ID** 而不是 tag（`latest` 会动，tag 没变不代表镜像没变），没变就一步不走；
 重建前列出容器内除守护会话以外的 tmux 会话并拒绝执行，因为重建会把里面跑着的 coding agent
-一起杀掉；重建后报 agent-anywhere 的**真实**版本（读已装包的 package.json，见下）和守护状态。
+一起杀掉；重建后报 agent-anywhere 的**真实**版本（读已装包的 package.json，见下）和守护状态；
+最后清掉被顶替下来的旧镜像（每次 pull 都会留下一个 ~4.5GB 的 dangling 镜像，docker 不回收，
+oracle 上曾一次攒出 24GB）——只按 `org.opencontainers.image.source` 标签清本仓库出的，
+不碰宿主上别的服务；镜像没变时也清一遍兜底，`--dry-run` 不清。要回滚就把 compose 的 `image:`
+钉到 GHCR 上的 `sha-<短sha>` 再 update，不靠本地留旧镜像。
 
 手动等价物，没有上面这些检查：
 
