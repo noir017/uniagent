@@ -17,8 +17,9 @@
 #   uniagent --root          以 root 进入（装包用；user 本身也有免密 sudo）
 #   uniagent --workspace     直接落到 ~/workspace
 #   uniagent --status        只看容器状态，不进入
-#   uniagent update          拉 GHCR 上的新镜像并重建容器（--dry-run 只看会不会动，
-#                            --force 无视容器内还开着的 tmux 会话）
+#   uniagent update          拉 GHCR 上的新镜像并重建容器，再清掉被顶替下来的旧镜像
+#                            （--dry-run 只看会不会动、不清理，--force 无视容器内
+#                            还开着的 tmux 会话）
 set -euo pipefail
 
 APP_DIR=/mnt/cache/appdata/uniagent
@@ -28,6 +29,34 @@ WORKDIR=/home/user
 
 die() { printf '%s\n' "uniagent: $*" >&2; exit 1; }
 _short() { local id="${1#sha256:}"; printf '%s' "${id:0:12}"; }
+
+# 清掉被新版顶替下来的旧镜像。每次 pull 到新的 latest，旧镜像就丢了 tag 变成 dangling
+# （一个约 4.5GB），docker 不会自己回收 —— 2026-09-19 在 oracle 上一次清出 18 个、24GB。
+#
+# 只清这个仓库 CI 出的镜像：按 CI 打的 org.opencontainers.image.source 标签筛，宿主上
+# 别的服务留下的 dangling 镜像不归这里管。prune 不删仍被任何容器（含停着的）引用的
+# 镜像，所以正在跑的那个——哪怕 --dry-run 拉过新版后它已经没 tag 了——不会被误删。
+# 本地不留旧版本做回滚：GHCR 上每次提交都有 sha-<短sha> tag，回滚是把 compose 的
+# image: 钉过去再 update，比一个没 tag 的本地镜像好认。
+prune_old_images() {
+    local src out freed
+    src="$(docker image inspect "$1" \
+        -f '{{index .Config.Labels "org.opencontainers.image.source"}}' 2>/dev/null || true)"
+    if [ -z "${src}" ]; then
+        printf '%s\n' "uniagent: $1 没有 org.opencontainers.image.source 标签，分不出哪些旧镜像是自己的，不清理" >&2
+        return 0
+    fi
+    # 清理失败不该让 update 失败：容器已经换好了，剩下的只是磁盘。
+    if ! out="$(docker image prune -f --filter "label=org.opencontainers.image.source=${src}" 2>&1)"; then
+        printf '%s\n' "uniagent: 清理旧镜像失败（容器不受影响）：${out}" >&2
+        return 0
+    fi
+    freed="$(printf '%s\n' "${out}" | sed -n 's/^Total reclaimed space: //p')"
+    case "${freed}" in
+        ''|0B) printf '%s\n' "uniagent: 没有要清的旧镜像" >&2 ;;
+        *)     printf '%s\n' "uniagent: 已清掉被顶替的旧镜像，回收 ${freed}" >&2 ;;
+    esac
+}
 
 # ---- update：拉新镜像并重建容器 ----
 # 这是更新链路的最后一棒，前两棒在 GitHub 上：agent-anywhere 发 Release →
@@ -69,6 +98,8 @@ do_update() {
 
     if [ "${before}" = "${after}" ]; then
         printf '%s\n' "uniagent: 已经是最新（$(_short "${after}")），容器不动" >&2
+        # 镜像没换也清一遍：兜住上回没清掉的，以及有这段逻辑之前攒下的。
+        [ "${dry}" -eq 1 ] || prune_old_images "${ref}"
         return 0
     fi
     printf '%s\n' "uniagent: 镜像 $(_short "${before:-none}") → $(_short "${after}")" >&2
@@ -103,6 +134,9 @@ do_update() {
     done
     [ "$(docker inspect -f '{{.State.Status}}' "${CONTAINER}" 2>/dev/null)" = running ] \
         || die "等了 15s 容器仍未 running"
+
+    # 放在确认新容器 running 之后：up -d 半路失败时旧镜像还留着，手工救场有东西可用。
+    prune_old_images "${ref}"
 
     # 验收 agent-anywhere 的版本只能读已装包的 package.json：
     # `agent-anywhere --version` 打印的是源码里硬编码的字符串（一直是 0.2.0），
