@@ -209,8 +209,8 @@ RUN set -eux; \
 # 只有 codex 例外：codex 与 codex-acp 必须同装（见 agents/codex.sh），故合并为一个 token。
 # 版本 ARG 留在 Dockerfile（供 bump-agent-anywhere.yml sed 改写），以环境变量透给脚本。
 ARG AGENTS="opencode,claude,codex,agy,agent-anywhere"
-ARG AGENT_ANYWHERE_VERSION=1.36.3
-ARG AGENT_ANYWHERE_SHA256=fed29cc56fa4fc34c871186767e0ac4c87c6c574c9b97c1ebe097b0b8e469880
+ARG AGENT_ANYWHERE_VERSION=1.37.0
+ARG AGENT_ANYWHERE_SHA256=53fc3085ca943722c44cb2cbaa82a9d848f6a69d21b1ae05c8a3134ba624b0c3
 COPY agents/ /opt/agents/
 COPY codex/config.toml /opt/codex-config/config.toml
 RUN set -eux; \
