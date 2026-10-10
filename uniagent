@@ -22,7 +22,12 @@
 #                            还开着的 tmux 会话）
 set -euo pipefail
 
-APP_DIR=/mnt/cache/appdata/uniagent
+# compose 目录。默认是 oracle 的 —— 2026-09-05 起 oracle 上这个就是全机群唯一的 uniagent。
+# 这里曾写死 unraid 的 /mnt/cache/appdata/uniagent，oracle 那份靠手工改这一行（以及下面两处
+# `ssh uniagent-unraid`）才能用，于是 2026-10-10 拿仓库版本覆盖宿主机副本时，update 当场报
+# 「找不到 /mnt/cache/appdata/uniagent/docker-compose.yml」。仓库版本要能原样装上唯一那台机器；
+# 别的地方用就设 UNIAGENT_APP_DIR，而不是改这一行。
+APP_DIR="${UNIAGENT_APP_DIR:-/home/ubuntu/apps/uniagent}"
 CONTAINER=uniagent
 CT_USER=user
 WORKDIR=/home/user
@@ -159,9 +164,9 @@ do_update() {
     done
     printf '%s\n' "${st:-（拿不到 daemon 状态）}" | sed 's/^/    /' >&2
 
-    # teleport agent 重新注册要十几秒，这段时间 `ssh uniagent-unraid` 会静默挂住
+    # teleport agent 重新注册要十几秒，这段时间 `ssh uniagent` 会静默挂住
     # （不报"节点不存在"，就是不出声），别误判成网络故障。
-    printf '%s\n' "uniagent: 完成。teleport agent 重新注册约 15s，其间 ssh uniagent-unraid 会挂住" >&2
+    printf '%s\n' "uniagent: 完成。teleport agent 重新注册约 15s，其间 ssh uniagent 会挂住" >&2
 }
 
 if [ "${1:-}" = update ]; then
