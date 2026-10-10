@@ -18,15 +18,15 @@
 |---|---|---|
 | Node.js 24 + npm | `/usr/bin/node` | NodeSource 官方源 |
 | opencode | `opencode` | npm `@opencode/cli`（v2）。v1 的包名是 `opencode-ai`，两者都把 bin 装成 `opencode`，不能同装 |
-| Claude Code | `claude` | npm `@anthropic-ai/claude-code`。**镜像里只有这一份**：agent-anywhere 的 cc harness 经由 Agent SDK 本来还自带一份同样的 ~222 MB 二进制，`agents/agent-anywhere.sh` 装完即删，`agent-anywhere-daemon.sh` 用 `CLAUDE_CODE_EXECUTABLE` 把 SDK 指到这份。所以 cc harness 跑的 CLI 版本 = 这里的版本（构建时取 npm latest） |
+| Claude Code | `claude` | npm `@anthropic-ai/claude-code`。**镜像里只有这一份**：talkcode 的 cc harness 经由 Agent SDK 本来还自带一份同样的 ~222 MB 二进制，`agents/talkcode.sh` 装完即删，`talkcode-daemon.sh` 用 `CLAUDE_CODE_EXECUTABLE` 把 SDK 指到这份。所以 cc harness 跑的 CLI 版本 = 这里的版本（构建时取 npm latest） |
 | Codex CLI | `codex` | npm `@openai/codex`，**版本钉死**（`CODEX_VERSION`，当前 0.159.2）—— 见下一行为何不能随便升 |
-| codex-acp | `codex-acp` | npm `@agentclientprotocol/codex-acp`，agent-anywhere `harness: codex` 启动的 ACP 适配器。它把 `@openai/codex` 声明成普通依赖，而 npm 对 0.x 的 caret 锁次版本号（`^0.159.1` = `<0.160.0`），所以顶层 codex 版本一旦对不上，就会在它的 `node_modules` 里再嵌一份 ~284 MB 的 codex。构建层有断言会在漂移时直接失败。连 newapi 网关的配置预置在 `~/.codex/config.toml` |
+| codex-acp | `codex-acp` | npm `@agentclientprotocol/codex-acp`，talkcode `harness: codex` 启动的 ACP 适配器。它把 `@openai/codex` 声明成普通依赖，而 npm 对 0.x 的 caret 锁次版本号（`^0.159.1` = `<0.160.0`），所以顶层 codex 版本一旦对不上，就会在它的 `node_modules` 里再嵌一份 ~284 MB 的 codex。构建层有断言会在漂移时直接失败。连 newapi 网关的配置预置在 `~/.codex/config.toml` |
 | Antigravity CLI | `agy` | 官方安装脚本，装在 `/usr/local/bin`，属主 `user`（便于自更新） |
 | agyacct | `agyacct` | agy 的多 Google 账号切换器（本仓库 `bin/agyacct`）。见「agy 多账号切换」一节 |
 | Go | `/usr/local/go/bin/go` | 官方 tarball（`GO_VERSION` ARG，当前 1.27.0），`go`/`gofmt` 已软链进 `/usr/local/bin` |
 | uv / uvx | `/usr/local/bin/uv` | Astral 官方脚本 |
 | Teleport agent | `teleport` | apt 源 `stable/v18`，**钉 18.10.0**（不能比集群 auth 新），默认不启动 |
-| agent-anywhere | `agent-anywhere` | IM 网关（Telegram ↔ claude/opencode/…）。版本由 Dockerfile 的 `AGENT_ANYWHERE_VERSION` 钉死（当前 0.4.0），装的是 GitHub Release 的 tarball 并校验 SHA256。见「IM 网关」一节 |
+| talkcode | `talkcode` | IM 网关（Telegram ↔ claude/opencode/…）。版本由 Dockerfile 的 `TALKCODE_VERSION` 钉死（当前 0.4.0），装的是 GitHub Release 的 tarball 并校验 SHA256。见「IM 网关」一节 |
 | 其他 | git、python3、build-essential、jq、ripgrep、fd、tmux、htop… | |
 
 > 所有工具都装在 `/usr/local` 或 `/usr` 下，**不在 `$HOME`**，因此不会被 `/home/user` 的
@@ -80,7 +80,7 @@ uniagent --workspace        # 落到 ~/workspace
 凭据写在 `/home/user` 下，已持久化。SSH 会话里 `agy` 会打印授权 URL，在本地浏览器打开即可。
 
 `codex` 是例外，不需要 `codex login`：预置的 `~/.codex/config.toml` 把它指向容器内的
-newapi 网关，key 从 agent-anywhere 的 `.env` 经 `OPENAI_API_KEY` 注入。
+newapi 网关，key 从 talkcode 的 `.env` 经 `OPENAI_API_KEY` 注入。
 想改回 ChatGPT 订阅登录就删掉那份 config.toml 再 `codex login` —— 但那要交互式浏览器授权，
 无头容器里做不了。
 
@@ -188,7 +188,7 @@ uniagent update              # 拉新镜像、重建、清旧镜像；--dry-run 
 `update` 比手敲两条命令多做的事，都是踩过才加的：镜像引用从 compose 里读（不写死，钉版本时
 跟着变）；比**镜像 ID** 而不是 tag（`latest` 会动，tag 没变不代表镜像没变），没变就一步不走；
 重建前列出容器内除守护会话以外的 tmux 会话并拒绝执行，因为重建会把里面跑着的 coding agent
-一起杀掉；重建后报 agent-anywhere 的**真实**版本（读已装包的 package.json，见下）和守护状态；
+一起杀掉；重建后报 talkcode 的**真实**版本（读已装包的 package.json，见下）和守护状态；
 最后清掉被顶替下来的旧镜像（每次 pull 都会留下一个 ~4.5GB 的 dangling 镜像，docker 不回收，
 oracle 上曾一次攒出 24GB）——只按 `org.opencontainers.image.source` 标签清本仓库出的，
 不碰宿主上别的服务；镜像没变时也清一遍兜底，`--dry-run` 不清。要回滚就把 compose 的 `image:`
@@ -208,61 +208,66 @@ docker compose pull && docker compose up -d
 骨架（`.bashrc`、`.local/bin`、`workspace`）补进空的挂载目录，已存在的文件不会被覆盖。
 IM 网关会由 entrypoint 自动拉起，重建后**不需要任何手工补动作**。
 
-## IM 网关（agent-anywhere）
+## IM 网关（talkcode）
 
-Telegram 消息 → agent-anywhere → claude / opencode（ACP），回复流式写回。程序在镜像里，
+Telegram 消息 → talkcode → claude / opencode（ACP），回复流式写回。程序在镜像里，
 配置在挂载里 —— 这条分界是刻意的：镜像可以随便重建，token 与会话历史不跟着走。
+
+2.0.0 之前它叫 agent-anywhere（仓库 noir017/agent-anywhere，配置在 `~/.config/agent-anywhere`）。
+talkcode 不读旧名字下的任何东西；改名后第一次起容器时，entrypoint 调
+`talkcode-daemon.sh migrate-from-agent-anywhere` 把旧配置目录**复制**过来（旧的原样留着，
+换回旧镜像照样能跑），新目录已存在就什么都不做。
 
 | 东西 | 位置 | 进镜像？ |
 |---|---|---|
-| 程序 | `/usr/bin/agent-anywhere`（`/usr/lib/node_modules/agent-anywhere-cli`） | ✅ 版本钉死 |
-| 守护脚本 | `/usr/local/bin/agent-anywhere-daemon.sh` | ✅ |
-| 配置 | `~/.config/agent-anywhere/config.yaml` | ❌ 挂载 |
-| token | `~/.config/agent-anywhere/.env`（chmod 600） | ❌ 挂载 |
-| 会话绑定 | `~/.config/agent-anywhere/conversations.json` | ❌ 挂载 |
-| 日志 | `~/.config/agent-anywhere/daemon.log` | ❌ 挂载 |
+| 程序 | `/usr/bin/talkcode`（`/usr/lib/node_modules/talkcode`） | ✅ 版本钉死 |
+| 守护脚本 | `/usr/local/bin/talkcode-daemon.sh` | ✅ |
+| 配置 | `~/.config/talkcode/config.yaml` | ❌ 挂载 |
+| token | `~/.config/talkcode/.env`（chmod 600） | ❌ 挂载 |
+| 会话绑定 | `~/.config/talkcode/conversations.json` | ❌ 挂载 |
+| 日志 | `~/.config/talkcode/daemon.log` | ❌ 挂载 |
 
-容器 PID 1 是 teleport，没有 systemd，所以守护由 `agent-anywhere-daemon.sh` 顶上：跑在
+容器 PID 1 是 teleport，没有 systemd，所以守护由 `talkcode-daemon.sh` 顶上：跑在
 独立 tmux 会话里，挂了自动重启，5s→300s 指数退避（跑满 60s 才算健康并重置退避，免得
 配置错误时空转刷 Telegram API）。entrypoint 在 `config.yaml` 存在时自动 `start`，
 所以**没配过的机器不会 crash-loop**。
 
 ```bash
-bash /usr/local/bin/agent-anywhere-daemon.sh status   # 状态
-bash /usr/local/bin/agent-anywhere-daemon.sh stop     # 改完配置重启用
-bash /usr/local/bin/agent-anywhere-daemon.sh start
-tail -f ~/.config/agent-anywhere/daemon.log           # 日志
-tmux attach -t agent-anywhere-daemon                  # 贴现场
+bash /usr/local/bin/talkcode-daemon.sh status   # 状态
+bash /usr/local/bin/talkcode-daemon.sh stop     # 改完配置重启用
+bash /usr/local/bin/talkcode-daemon.sh start
+tail -f ~/.config/talkcode/daemon.log           # 日志
+tmux attach -t talkcode-daemon                  # 贴现场
 ```
 
-**升级**：镜像侧是自动的。agent-anywhere 仓库发出新 Release 之后，
-`.github/workflows/bump-agent-anywhere.yml`（每天一次，也可在 Actions 页手动 Run workflow）
+**升级**：镜像侧是自动的。talkcode 仓库发出新 Release 之后，
+`.github/workflows/bump-talkcode.yml`（每天一次，也可在 Actions 页手动 Run workflow）
 会查到它、从 Release 自带的 `SHA256SUMS` 取校验和、改掉 Dockerfile 里
-`AGENT_ANYWHERE_VERSION` 与 `AGENT_ANYWHERE_SHA256` 两个 ARG 并提交，然后复用 docker.yml
+`TALKCODE_VERSION` 与 `TALKCODE_SHA256` 两个 ARG 并提交，然后复用 docker.yml
 把镜像推到 GHCR。这一层是 Dockerfile 的最后一层，改它不会让前面的 Node / 各 AI CLI 缓存失效。
 
 **机器侧不自动**：镜像出来之后仍然要自己 `uniagent update`（见「重建」）。重建会杀掉容器里
 正在跑的东西，那个时机不该由定时任务替人决定。
 
-要钉某个版本（回退，或抢在定时之前升）：Actions → Bump agent-anywhere → Run workflow，
+要钉某个版本（回退，或抢在定时之前升）：Actions → Bump talkcode → Run workflow，
 填版本号。定时那条路**只升不降**（Release 被撤回时不会把线上悄悄退回去）；填了版本号的
 手动那条路可以降。直接手改两个 ARG 再推 main 当然也照样有效，自动流程只是省掉抄校验和。
 
-> ⚠️ `agent-anywhere --version` 打印的是 cli.ts 里硬编码的字符串（当前恒为 `0.2.0`），
+> ⚠️ `talkcode --version` 打印的是 cli.ts 里硬编码的字符串（当前恒为 `0.2.0`），
 > **不是**真实版本。要看真实版本：
-> `node -p "require('/usr/lib/node_modules/agent-anywhere-cli/package.json').version"`
+> `node -p "require('/usr/lib/node_modules/talkcode/package.json').version"`
 
 > ⚠️ 别在 `~/.local` 里再装一份：`$HOME/.local/bin` 在 PATH 里排在 `/usr/bin` 前面，
-> 手敲 `agent-anywhere` 会命中它，而守护进程走的是绝对路径 `/usr/bin/agent-anywhere`，
+> 手敲 `talkcode` 会命中它，而守护进程走的是绝对路径 `/usr/bin/talkcode`，
 > 两边会静默跑成不同版本。真要临时试私有构建，用
-> `AGENT_ANYWHERE_BIN=~/.local/bin/agent-anywhere bash /usr/local/bin/agent-anywhere-daemon.sh start`。
+> `TALKCODE_BIN=~/.local/bin/talkcode bash /usr/local/bin/talkcode-daemon.sh start`。
 
 ### webui 的终端面板（ttyd，默认不开）
 
 打开之后，webui 顶栏多一个 `>_` 按钮，把聊天记录换成容器里的一个真终端——于是任何 coding
 agent 的 CLI，连同它的全屏 TUI，都能在同一个页面里直接跑。每个 topic 一个终端。
 
-**为什么 PTY 在这边而不在 agent-anywhere 里。** agent-anywhere 只做一层过 session cookie
+**为什么 PTY 在这边而不在 talkcode 里。** talkcode 只做一层过 session cookie
 的反向代理，一个 npm 依赖都没加。它自己实现的话要引 node-pty（它的 tarball 里只有 darwin
 和 win32 的 prebuild，**Linux 一个都没有**，等于所有 Linux 安装都要现场编译）、xterm.js、
 WebSocket 服务端，外加 scrollback / resize / 重连 / 手机软键盘。ttyd 是 1.3MB 静态二进制，
@@ -271,14 +276,14 @@ WebSocket 服务端，外加 scrollback / resize / 重连 / 手机软键盘。tt
 **两个开关，都要打开**，因为它们回答的是两个问题：
 
 ```yaml
-# ① ~/.config/agent-anywhere/config.yaml —— 页面上要不要有那个按钮
+# ① ~/.config/talkcode/config.yaml —— 页面上要不要有那个按钮
 platforms:
   web:
     type: webui
     terminal:
       enabled: true
-      socket: /home/user/.config/agent-anywhere/webui-term.sock   # 必须和 ② 一致
-      # 窗口右上角的「关闭」（agent-anywhere 1.26.0 起）。不配就只有最小化，没有关闭
+      socket: /home/user/.config/talkcode/webui-term.sock   # 必须和 ② 一致
+      # 窗口右上角的「关闭」（talkcode 1.26.0 起）。不配就只有最小化，没有关闭
       # 按钮 —— daemon 不知道后端是 tmux，也不该知道，所以「怎么结束一个会话」只能由
       # 这边说。必须和 aa-terminal.sh 里的 -L aa-web / aa-<topic> 对上。
       endCommand: ["tmux", "-L", "aa-web", "kill-session", "-t", "aa-{topic}"]
@@ -303,12 +308,12 @@ environment:
 | `/usr/local/bin/ttyd` | 1.7.7 静态二进制，逐架构校验 sha256 装进镜像。听 unix socket，不占端口 |
 | `/usr/local/bin/aa-terminal.sh` | ttyd 跑的命令。校验 topic id，然后 `tmux -L aa-web new -A -s aa-<topic>` |
 | `/usr/local/etc/aa-terminal.tmux.conf` | 那台 tmux server 的配置：关状态栏、开鼠标、50000 行回滚 |
-| `~/.config/agent-anywhere/webui-term.sock` | 后端入口。entrypoint 起完收紧到 0600 |
-| `~/.config/agent-anywhere/ttyd.log` | ttyd 自己的日志 |
+| `~/.config/talkcode/webui-term.sock` | 后端入口。entrypoint 起完收紧到 0600 |
+| `~/.config/talkcode/ttyd.log` | ttyd 自己的日志 |
 
 **安全边界**
 
-- socket 不是端口，网络上根本够不着 —— 所以 agent-anywhere 那道 session 检查是唯一入口，
+- socket 不是端口，网络上根本够不着 —— 所以 talkcode 那道 session 检查是唯一入口，
   不是两个入口之一。entrypoint 会把它 chmod 到 0600，否则同机其他用户能直连、绕开登录。
 - 浏览器传进来的 `?arg=<topic>` 最终是要进 exec 的，两边各校验一次：代理比对 topic 表，
   wrapper 再比对 `^[0-9a-f]{8}$`。
@@ -317,8 +322,8 @@ environment:
 
 **坑**
 
-- **tmux 必须是独立 server（`-L aa-web`）。** agent-anywhere 守护进程自己就跑在默认 server
-  的 `agent-anywhere-daemon` 会话里，conf 里任何一条 `set -g` 都会串过去。已验证隔离：
+- **tmux 必须是独立 server（`-L aa-web`）。** talkcode 守护进程自己就跑在默认 server
+  的 `talkcode-daemon` 会话里，conf 里任何一条 `set -g` 都会串过去。已验证隔离：
   `tmux show -gv status` 仍是 `on`，`tmux -L aa-web show -gv status` 是 `off`。
 - **不能不套 tmux。** ttyd 每个 WebSocket 连接 fork 一个新进程，断开就 SIGHUP —— 手机切一下
   后台回来，正在跑的 agent 就没了。套上之后断线只是重绘。

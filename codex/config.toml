@@ -1,8 +1,8 @@
-# Codex 配置（agent-anywhere 的 harness=codex 经 codex-acp 使用）。
+# Codex 配置（talkcode 的 harness=codex 经 codex-acp 使用）。
 #
 # 认证走容器内的 newapi 网关，而不是 ChatGPT 订阅登录：后者要交互式浏览器授权，
 # 在这个无头容器里做不了。key 不写在这里 —— env_key 只是变量名，值由
-# agent-anywhere 在 config load 时从 ~/.config/agent-anywhere/.env 注入 process.env，
+# talkcode 在 config load 时从 ~/.config/talkcode/.env 注入 process.env，
 # 再由 buildHarnessEnv 整份传给 codex-acp 子进程（与 dsh 走同一把 newapi key、
 # 同一条注入路径）。
 #
@@ -16,7 +16,7 @@ model_provider = "newapi"
 
 # 推理档位只能在这里设，不能从聊天里切。codex-acp 的 models.availableModels 把
 # "模型 × 推理档"展成 31 条（gpt-5.6-terra[high] 之类），但 configOptions.model
-# 只有 6 个裸 id，而 agent-anywhere 的 /model 读的是后者；把带后缀的 id 交给
+# 只有 6 个裸 id，而 talkcode 的 /model 读的是后者；把带后缀的 id 交给
 # session/set_config_option 会被 -32602 Invalid params 拒掉（实测 1.12.0）。
 #
 # 注意这一行必须留在任何 [table] 头之前。写到 [model_providers.newapi] 后面，

@@ -23,7 +23,7 @@ if ! [[ "$TOPIC" =~ ^[0-9a-f]{8}$ ]]; then
     exit 64
 fi
 
-# A tmux server of its own (-L), NOT the default one. The agent-anywhere daemon is supervised
+# A tmux server of its own (-L), NOT the default one. The talkcode daemon is supervised
 # in a session on the default server, and a `set -g` in the config below would otherwise reach
 # it. Separate server, separate blast radius.
 exec tmux -L aa-web -f /usr/local/etc/aa-terminal.tmux.conf new -A -s "aa-${TOPIC}"
