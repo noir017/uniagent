@@ -19,8 +19,8 @@
 | Node.js 24 + npm | `/usr/bin/node` | NodeSource 官方源 |
 | opencode | `opencode` | npm `@opencode/cli`（v2）。v1 的包名是 `opencode-ai`，两者都把 bin 装成 `opencode`，不能同装 |
 | Claude Code | `claude` | npm `@anthropic-ai/claude-code`。**镜像里只有这一份**：talkcode 的 cc harness 经由 Agent SDK 本来还自带一份同样的 ~222 MB 二进制，`agents/talkcode.sh` 装完即删，`talkcode-daemon.sh` 用 `CLAUDE_CODE_EXECUTABLE` 把 SDK 指到这份。所以 cc harness 跑的 CLI 版本 = 这里的版本（构建时取 npm latest） |
-| Codex CLI | `codex` | npm `@openai/codex`，**版本钉死**（`CODEX_VERSION`，当前 0.159.2）—— 见下一行为何不能随便升 |
-| codex-acp | `codex-acp` | npm `@agentclientprotocol/codex-acp`，talkcode `harness: codex` 启动的 ACP 适配器。它把 `@openai/codex` 声明成普通依赖，而 npm 对 0.x 的 caret 锁次版本号（`^0.159.1` = `<0.160.0`），所以顶层 codex 版本一旦对不上，就会在它的 `node_modules` 里再嵌一份 ~284 MB 的 codex。构建层有断言会在漂移时直接失败。连 newapi 网关的配置预置在 `~/.codex/config.toml` |
+| Codex CLI | `codex` | npm `@openai/codex`，**版本钉死**（`CODEX_VERSION`，当前 0.160.1）—— 见下一行为何不能随便升 |
+| codex-acp | `codex-acp` | npm `@agentclientprotocol/codex-acp`，talkcode `harness: codex` 启动的 ACP 适配器。它把 `@openai/codex` 声明成普通依赖，而 npm 对 0.x 的 caret 锁次版本号（`^0.160.1` = `<0.161.0`），所以顶层 codex 版本一旦对不上，就会在它的 `node_modules` 里再嵌一份 ~284 MB 的 codex。构建层有断言会在漂移时直接失败。连 newapi 网关的配置预置在 `~/.codex/config.toml` |
 | Antigravity CLI | `agy` | 官方安装脚本，装在 `/usr/local/bin`，属主 `user`（便于自更新） |
 | agyacct | `agyacct` | agy 的多 Google 账号切换器（本仓库 `bin/agyacct`）。见「agy 多账号切换」一节 |
 | Go | `/usr/local/go/bin/go` | 官方 tarball（`GO_VERSION` ARG，当前 1.27.0），`go`/`gofmt` 已软链进 `/usr/local/bin` |
@@ -253,8 +253,8 @@ tmux attach -t talkcode-daemon                  # 贴现场
 填版本号。定时那条路**只升不降**（Release 被撤回时不会把线上悄悄退回去）；填了版本号的
 手动那条路可以降。直接手改两个 ARG 再推 main 当然也照样有效，自动流程只是省掉抄校验和。
 
-> ⚠️ `talkcode --version` 打印的是 cli.ts 里硬编码的字符串（当前恒为 `0.2.0`），
-> **不是**真实版本。要看真实版本：
+> `talkcode --version` 在 1.1.0 之前打印的是 cli.ts 里硬编码的 `0.2.0`；1.1.0 起（2026-09-05）
+> 读 package.json，已经可信。验收仍以已装包的 package.json 为准，它不依赖 CLI 能跑起来：
 > `node -p "require('/usr/lib/node_modules/talkcode/package.json').version"`
 
 > ⚠️ 别在 `~/.local` 里再装一份：`$HOME/.local/bin` 在 PATH 里排在 `/usr/bin` 前面，

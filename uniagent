@@ -140,9 +140,9 @@ do_update() {
     # 放在确认新容器 running 之后：up -d 半路失败时旧镜像还留着，手工救场有东西可用。
     prune_old_images "${ref}"
 
-    # 验收 talkcode 的版本只能读已装包的 package.json：
-    # `talkcode --version` 打印的是源码里硬编码的字符串（一直是 0.2.0），
-    # 拿它断言会永远"通过"。
+    # 验收 talkcode 的版本读已装包的 package.json，不走 `talkcode --version`：后者在 1.1.0
+    # 之前打印的是源码里硬编码的 0.2.0，拿它断言会永远"通过"；现在虽然准了，读文件仍然
+    # 不依赖 CLI 能跑起来。
     local aa
     aa="$(docker exec -u "${CT_USER}" "${CONTAINER}" \
         node -p "require('/usr/lib/node_modules/talkcode/package.json').version" 2>/dev/null)" \
