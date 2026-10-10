@@ -6,7 +6,7 @@
   the MCP registration passes in.
 #>
 param(
-  [string]$Query  = 'agent-anywhere 发布流程',
+  [string]$Query  = 'talkcode 发布流程',
   [string]$ApiUrl = 'https://hindsight-api.lan.noharanas.eu.org',
   [string]$Bank   = 'agent'
 )

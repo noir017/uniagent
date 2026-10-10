@@ -87,7 +87,7 @@ RUN set -eux; \
 # ---------- 5. AI CLI（npm 全局，落在 /usr/lib/node_modules）----------
 #
 # codex 这一对必须同命令、同版本地装，否则镜像里会有两份 codex。
-# @agentclientprotocol/codex-acp 是 agent-anywhere 的 harness=codex 启动的 ACP 适配器
+# @agentclientprotocol/codex-acp 是 talkcode 的 harness=codex 启动的 ACP 适配器
 # （替代已废弃的 @zed-industries/codex-acp），它把 @openai/codex 声明成普通依赖，
 # 而 npm 对 0.x 版本的 caret 是锁次版本号的：^0.159.1 等价于 >=0.159.1 <0.160.0。
 # 所以顶层若是别的次版本，codex-acp 会在自己的 node_modules 里再嵌一份匹配的
@@ -99,11 +99,11 @@ RUN set -eux; \
 # 悄悄把镜像撑大 300 MB。
 #
 # 0.159.2：codex-acp 2.0.1（2026-09-29，补丁版）把依赖改成了 ^0.159.1，0.158.0 从那一刻起
-# 同样挂在断言上（agent-anywhere 1.36.0、1.36.1 因此没进镜像）。0.159.2 + codex-acp 2.0.1
+# 同样挂在断言上（talkcode 1.36.0、1.36.1 因此没进镜像）。0.159.2 + codex-acp 2.0.1
 # 已在临时 prefix 里实测装出单份 codex，并经 ACP 握手、建会话、跑一轮验证（2026-09-30）。
 # 0.158.0：codex-acp 2.0.0（2026-09-28，大版本号）把依赖改成了 ^0.158.0，
-# 0.156.1 从那一刻起每次构建都挂在断言上（agent-anywhere 1.34.2 因此没进镜像）。
-# 0.158.0 + codex-acp 2.0.0 已在临时 prefix 里实测装出单份 codex，并经 agent-anywhere
+# 0.156.1 从那一刻起每次构建都挂在断言上（talkcode 1.34.2 因此没进镜像）。
+# 0.158.0 + codex-acp 2.0.0 已在临时 prefix 里实测装出单份 codex，并经 talkcode
 # 的 cx 链路实跑：握手、模型/effort 上报、INITIAL_AGENT_MODE=agent-full-access 下执行
 # 命令、/model 与 /effort 的选项列表、连续两轮，均正常（2026-09-29）。
 # 更早：0.156.1 对 codex-acp 1.13.1（2026-09-23）。
@@ -159,10 +159,10 @@ RUN set -eux; \
 COPY entrypoint.sh /usr/local/sbin/entrypoint.sh
 RUN chmod +x /usr/local/sbin/entrypoint.sh
 
-# ---------- 9b. ttyd：agent-anywhere webui 终端面板的后端 ----------
+# ---------- 9b. ttyd：talkcode webui 终端面板的后端 ----------
 #
-# 网页里那个终端不是 agent-anywhere 自己实现的 —— 它只做一层过 session cookie 的反向代理，
-# 真正的 PTY 在这里。这么分是为了让 agent-anywhere 一个原生依赖都不用加：自己实现要引
+# 网页里那个终端不是 talkcode 自己实现的 —— 它只做一层过 session cookie 的反向代理，
+# 真正的 PTY 在这里。这么分是为了让 talkcode 一个原生依赖都不用加：自己实现要引
 # node-pty（**它的 tarball 里只有 darwin 和 win32 的 prebuild，Linux 一个都没有**，等于
 # 所有 Linux 安装都要现场编译）、xterm.js、WebSocket 服务端，外加 scrollback / resize /
 # 重连 / 手机软键盘。ttyd 是 1.3MB 静态二进制，这些连同 CJK 与 IME 支持全都现成。
@@ -203,23 +203,23 @@ RUN set -eux; \
     gh --version
 
 # ---------- 11. agents 组合层（按 AGENTS 按需安装）----------
-#   全量：  --build-arg AGENTS="opencode,claude,codex,agy,agent-anywhere"
+#   全量：  --build-arg AGENTS="opencode,claude,codex,agy,talkcode"
 #   精简：  --build-arg AGENTS="opencode,claude"
 # 每个 agent 独立一层：升级 opencode 只重建 opencode 层，前面全走缓存。
 # 只有 codex 例外：codex 与 codex-acp 必须同装（见 agents/codex.sh），故合并为一个 token。
-# 版本 ARG 留在 Dockerfile（供 bump-agent-anywhere.yml sed 改写），以环境变量透给脚本。
-ARG AGENTS="opencode,claude,codex,agy,agent-anywhere"
-ARG AGENT_ANYWHERE_VERSION=1.40.0
-ARG AGENT_ANYWHERE_SHA256=b525069aa3a188e2dd00a386142f3ebeacc9c4a6c48c65c42901535a99105a06
+# 版本 ARG 留在 Dockerfile（供 bump-talkcode.yml sed 改写），以环境变量透给脚本。
+ARG AGENTS="opencode,claude,codex,agy,talkcode"
+ARG TALKCODE_VERSION=2.0.0
+ARG TALKCODE_SHA256=854bda468c3f1fca09c71f7b6dbdde30460d3c75341774ba3c990c418c12746f
 COPY agents/ /opt/agents/
 COPY codex/config.toml /opt/codex-config/config.toml
 RUN set -eux; \
     rest="${AGENTS},"; \
     while [ -n "${rest}" ]; do \
         a="${rest%%,*}"; rest="${rest#*,}"; \
-        case ",opencode,claude,codex,agy,agent-anywhere," in \
+        case ",opencode,claude,codex,agy,talkcode," in \
             *,"${a}",*) ;; \
-            *) echo "unknown agent in AGENTS: $a (want: opencode,claude,codex,agy,agent-anywhere)" >&2; exit 1 ;; \
+            *) echo "unknown agent in AGENTS: $a (want: opencode,claude,codex,agy,talkcode)" >&2; exit 1 ;; \
         esac; \
     done
 RUN set -eux; \
@@ -237,8 +237,8 @@ RUN set -eux; \
         export USERNAME; bash /opt/agents/agy.sh ;; \
     esac
 RUN set -eux; \
-    case ",${AGENTS}," in *,agent-anywhere,*) \
-        export AGENT_ANYWHERE_VERSION AGENT_ANYWHERE_SHA256 AGENTS; bash /opt/agents/agent-anywhere.sh ;; \
+    case ",${AGENTS}," in *,talkcode,*) \
+        export TALKCODE_VERSION TALKCODE_SHA256 AGENTS; bash /opt/agents/talkcode.sh ;; \
     esac; \
     npm cache clean --force
 # 预置配置跟随 agent 走：没选 codex 就不播种 ~/.codex。
@@ -261,8 +261,8 @@ RUN set -eux; \
     rm -rf /opt/agents
 
 # 守护脚本放最后：改脚本不触发上面的下载层。
-COPY bin/agent-anywhere-daemon.sh /usr/local/bin/agent-anywhere-daemon.sh
-RUN chmod +x /usr/local/bin/agent-anywhere-daemon.sh
+COPY bin/talkcode-daemon.sh /usr/local/bin/talkcode-daemon.sh
+RUN chmod +x /usr/local/bin/talkcode-daemon.sh
 
 # recall MCP 服务（见 mcp/README.md）。放进镜像而不是 /home/user，是因为它是代码不是配置：
 # 镜像更新就一起更新，不会在某台机器上悄悄留个旧版本。指向它的注册项仍在 /home/user 下

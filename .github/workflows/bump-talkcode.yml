@@ -1,4 +1,4 @@
-# 把 Dockerfile 里钉的 agent-anywhere 版本追到 agent-anywhere 仓库的最新 Release，
+# 把 Dockerfile 里钉的 talkcode 版本追到 talkcode 仓库的最新 Release，
 # 然后直接调 docker.yml 把镜像编出来推到 GHCR。
 #
 # 手动做是四步：翻 Release 拿版本号 → 从 SHA256SUMS 抄校验和 → 改 Dockerfile 的两个
@@ -11,7 +11,7 @@
 # 触发：每天一次；也可以在 Actions 页手动 Run workflow 并指定版本（降级/回退用这条）。
 # 注意 GitHub 会在仓库连续 60 天没有提交后自动停用 schedule 触发。
 
-name: Bump agent-anywhere
+name: Bump talkcode
 
 on:
   schedule:
@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '目标 agent-anywhere 版本，如 0.5.0（留空 = 用最新 Release）'
+        description: '目标 talkcode 版本，如 0.5.0（留空 = 用最新 Release）'
         required: false
         type: string
 
@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: bump-agent-anywhere
+  group: bump-talkcode
   cancel-in-progress: false
 
 jobs:
@@ -48,7 +48,7 @@ jobs:
         id: bump
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_REPO: noir017/agent-anywhere
+          SOURCE_REPO: noir017/talkcode
           WANT: ${{ inputs.version }}
         run: |
           set -euo pipefail
@@ -61,8 +61,8 @@ jobs:
           fi
           [ -n "$want" ] || { echo "::error::拿不到目标版本"; exit 1; }
 
-          cur="$(sed -n 's/^ARG AGENT_ANYWHERE_VERSION=//p' Dockerfile)"
-          [ -n "$cur" ] || { echo "::error::Dockerfile 里没有 ARG AGENT_ANYWHERE_VERSION"; exit 1; }
+          cur="$(sed -n 's/^ARG TALKCODE_VERSION=//p' Dockerfile)"
+          [ -n "$cur" ] || { echo "::error::Dockerfile 里没有 ARG TALKCODE_VERSION"; exit 1; }
           echo "当前 $cur → 目标 $want"
 
           if [ "$want" = "$cur" ]; then
@@ -83,22 +83,22 @@ jobs:
           # 不是下载 tarball 后现算 —— 现算的话，下载环节被掉包一样能"对得上"。
           curl -fsSL -o /tmp/SHA256SUMS \
             "https://github.com/$SOURCE_REPO/releases/download/v$want/SHA256SUMS"
-          # 行形如：<64位sha>  ./agent-anywhere-cli-0.5.0.tgz
-          sha="$(awk -v f="./agent-anywhere-cli-$want.tgz" '$2 == f { print $1 }' /tmp/SHA256SUMS)"
+          # 行形如：<64位sha>  ./talkcode-0.5.0.tgz
+          sha="$(awk -v f="./talkcode-$want.tgz" '$2 == f { print $1 }' /tmp/SHA256SUMS)"
           if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
-            echo "::error::SHA256SUMS 里没有 agent-anywhere-cli-$want.tgz 的条目"
+            echo "::error::SHA256SUMS 里没有 talkcode-$want.tgz 的条目"
             cat /tmp/SHA256SUMS
             exit 1
           fi
 
           sed -i \
-            -e "s/^ARG AGENT_ANYWHERE_VERSION=.*/ARG AGENT_ANYWHERE_VERSION=$want/" \
-            -e "s/^ARG AGENT_ANYWHERE_SHA256=.*/ARG AGENT_ANYWHERE_SHA256=$sha/" \
+            -e "s/^ARG TALKCODE_VERSION=.*/ARG TALKCODE_VERSION=$want/" \
+            -e "s/^ARG TALKCODE_SHA256=.*/ARG TALKCODE_SHA256=$sha/" \
             Dockerfile
 
           # sed 匹配不上是不报错的，所以逐条断言写进去了
-          grep -qx "ARG AGENT_ANYWHERE_VERSION=$want" Dockerfile
-          grep -qx "ARG AGENT_ANYWHERE_SHA256=$sha" Dockerfile
+          grep -qx "ARG TALKCODE_VERSION=$want" Dockerfile
+          grep -qx "ARG TALKCODE_SHA256=$sha" Dockerfile
           if git diff --quiet -- Dockerfile; then
             echo "::error::两个 ARG 都断言通过，但 Dockerfile 没有变化"
             exit 1
@@ -106,7 +106,7 @@ jobs:
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m "chore(agent-anywhere): $want" -- Dockerfile
+          git commit -m "chore(talkcode): $want" -- Dockerfile
           git push
 
           {
@@ -114,7 +114,7 @@ jobs:
             echo "version=$want"
             echo "sha=$(git rev-parse HEAD)"
           } >> "$GITHUB_OUTPUT"
-          echo "agent-anywhere \`$cur\` → \`$want\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "talkcode \`$cur\` → \`$want\`" >> "$GITHUB_STEP_SUMMARY"
 
   build:
     name: Image
