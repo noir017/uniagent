@@ -5,6 +5,9 @@ ARG USERNAME=user
 ARG UID=1001
 ARG GID=1001
 ARG NODE_MAJOR=24
+# 钉死小版本：不钉的话 CI 的 gha 缓存会一直复用旧的 Node 层，上游出安全修复也进不来。
+# 升级就改这里（版本号以 deb.nodesource.com/node_24.x 的 Packages 为准）。
+ARG NODE_VERSION=24.22.1-1nodesource1
 ARG TELEPORT_CHANNEL=stable/v18
 # 必须 <= 集群 auth 版本（当前集群 18.10.0），agent 不允许比 auth 新
 ARG TELEPORT_VERSION=18.10.0
@@ -44,7 +47,7 @@ RUN set -eux; \
     echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
         > /etc/apt/sources.list.d/nodesource.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends nodejs; \
+    apt-get install -y --no-install-recommends nodejs=${NODE_VERSION}; \
     rm -rf /var/lib/apt/lists/*; \
     npm install -g npm@latest; \
     node -v; npm -v
