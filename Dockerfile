@@ -270,6 +270,14 @@ RUN set -eux; \
     npm cache clean --force; \
     rm -rf /opt/agents
 
+# ssh 登录会话的语言环境（2026-10-29）。上面 ENV 里的 LC_ALL 只有容器 PID 1 的子孙看得到；
+# talkcode 搬进自己的容器以后，这里的 agent 是网关经 ssh 远程起的，环境取的是登录环境
+# （talkcode-remote 跑 `bash -i -l -c`），实测里面没有 LC_ALL。缺了它 agent 跑的命令遇到
+# 中文按 POSIX 处理。只在未设时补，人经 Teleport 登录带进来的值照旧。单独一层、放这里：
+# 写进第 8 段会让后面所有下载层的缓存一起作废。
+RUN printf '%s\n' 'export LANG="${LANG:-C.UTF-8}" LC_ALL="${LC_ALL:-C.UTF-8}"' \
+      > /etc/profile.d/05-locale.sh
+
 # 守护脚本放最后：改脚本不触发上面的下载层。
 COPY bin/talkcode-daemon.sh /usr/local/bin/talkcode-daemon.sh
 RUN chmod +x /usr/local/bin/talkcode-daemon.sh

@@ -99,15 +99,19 @@ fi
 # 不一致也不会静默 —— 按钮在、后端没起，代理会明确回 502「terminal backend is not running」。
 #
 # -i 是 unix socket 不是端口：网络上根本够不着，所以 talkcode 那道 session 检查是
-# 唯一入口，而不是两个入口之一。socket 落在 bind mount 的配置目录里，两边都以 user 跑。
+# 唯一入口，而不是两个入口之一。socket 默认落在 bind mount 的配置目录里，两边都以 user 跑。
 # -b /term 必须和 talkcode 的前缀路由一致；-a 允许 URL 传参，这是「每个 topic 一个
 # 终端」的实现方式，传进来的东西两边各校验一次（代理比对 topic 表，wrapper 再比对正则）。
-WEB_TERM_SOCK="${HOME_DIR}/.config/talkcode/webui-term.sock"
+#
+# UNIAGENT_WEB_TERMINAL_SOCK 改 socket 的位置（2026-10-29）：talkcode 搬进自己的容器以后，
+# 网关读不到这个容器的 ~/.config/talkcode，socket 得放进一个两个容器都挂了的目录。
+# 网关容器的 uid 必须也是 1001 —— socket 是 0600。
+WEB_TERM_SOCK="${UNIAGENT_WEB_TERMINAL_SOCK:-${HOME_DIR}/.config/talkcode/webui-term.sock}"
 if [ "${UNIAGENT_WEB_TERMINAL:-0}" = "1" ] && [ -x /usr/local/bin/ttyd ]; then
     # 上次容器退出留下的 socket 文件会让 bind 直接失败，而它并不代表有进程在听。
     rm -f "${WEB_TERM_SOCK}"
-    mkdir -p "${HOME_DIR}/.config/talkcode"
-    chown "${UID_N}:${GID_N}" "${HOME_DIR}/.config/talkcode" 2>/dev/null || true
+    mkdir -p "${HOME_DIR}/.config/talkcode" "$(dirname "${WEB_TERM_SOCK}")"
+    chown "${UID_N}:${GID_N}" "${HOME_DIR}/.config/talkcode" "$(dirname "${WEB_TERM_SOCK}")" 2>/dev/null || true
     /usr/sbin/runuser -u "${USERNAME}" -- env HOME="${HOME_DIR}" \
         /usr/local/bin/ttyd \
             -i "${WEB_TERM_SOCK}" \

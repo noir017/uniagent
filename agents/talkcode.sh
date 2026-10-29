@@ -36,6 +36,14 @@ case ",${AGENTS:-}," in *,claude,*)
         echo "a bundled Claude binary is still inside talkcode" >&2
         exit 1
     fi
+    # claude-agent-acp 上 PATH（2026-10-29）：talkcode 搬进自己的容器以后，这里的 cc 是网关经
+    # ssh 远程起的，网关在**这台主机的 PATH 上**找 claude-agent-acp，不再用它自己带的那份。
+    # 链到 talkcode 自带的那份而不是另装一份：talkcode 的契约测试钉的是它依赖的那个适配器
+    # 版本（比如 2.8.0 permissions: ask 的拒绝文案），这样 bump-talkcode 换版本时两边一起换。
+    # 代价是这条链要求镜像里装着 talkcode；哪天 uniagent 不装 talkcode 了，改成单独 npm 装。
+    ln -sf /usr/lib/node_modules/talkcode/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js \
+        /usr/local/bin/claude-agent-acp
+    test -x /usr/local/bin/claude-agent-acp
     ;;
 esac
 echo "talkcode ${installed} installed at $(command -v talkcode)"

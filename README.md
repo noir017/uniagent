@@ -262,6 +262,22 @@ tmux attach -t talkcode-daemon                  # 贴现场
 > 两边会静默跑成不同版本。真要临时试私有构建，用
 > `TALKCODE_BIN=~/.local/bin/talkcode bash /usr/local/bin/talkcode-daemon.sh start`。
 
+### 网关在另一个容器里时（talkcode 2.9.0 起）
+
+talkcode 可以跑在自己的容器（`ghcr.io/noir017/talkcode`）里，把这台当成[远程主机](https://github.com/noir017/talkcode/blob/main/docs/remote-hosts.md)：
+经 ssh 连进来，自己装一个小服务（`~/.talkcode/remote/`），由它起 agent。这时内置网关不该再跑——
+把 `~/.config/talkcode/config.yaml` 挪走，entrypoint 就不起它。为此镜像做了三件事：
+
+- **`claude-agent-acp` 在 PATH 上**（`/usr/local/bin`，链到 talkcode 自带的那份，版本跟 talkcode 走）。
+  远程 cc 在主机的 PATH 上找它。
+- **登录环境补齐**：远程 agent 的环境是 `bash -i -l` 的登录环境，sshd 起的会话看不到 Dockerfile 的
+  `ENV`，也不经过 `talkcode-daemon.sh`。所以 `CLAUDE_CODE_EXECUTABLE` 写进
+  `/etc/profile.d/20-claude-code.sh`，`LANG`/`LC_ALL` 写进 `05-locale.sh`。模型 key 本来就在 `~/.bashrc`。
+- **终端 socket 可挪位置**：`UNIAGENT_WEB_TERMINAL_SOCK` 把 ttyd 的 socket 放进两个容器都挂了的目录；
+  网关容器必须也以 uid 1001 运行（socket 是 0600）。
+
+⚠️ 这种部署下别跑 `talkcode-daemon.sh stop`：它按名字 `pkill claude-agent-acp`，会把网关远程起的 agent 一起杀掉。
+
 ### webui 的终端面板（ttyd，默认不开）
 
 打开之后，webui 顶栏多一个 `>_` 按钮，把聊天记录换成容器里的一个真终端——于是任何 coding
