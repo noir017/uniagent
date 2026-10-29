@@ -145,6 +145,15 @@ do_update() {
     # 放在确认新容器 running 之后：up -d 半路失败时旧镜像还留着，手工救场有东西可用。
     prune_old_images "${ref}"
 
+    # 2026-10-29 起网关在自己的容器里（~/apps/talkcode，宿主机上的 talkcode 命令管它），这个
+    # 容器只是它的远程主机：没有 config.yaml，entrypoint 就不起内置网关，下面那段等守护状态
+    # 只会白等 10 秒再报 STOPPED。
+    if ! docker exec -u "${CT_USER}" "${CONTAINER}" test -f /home/user/.config/talkcode/config.yaml 2>/dev/null; then
+        printf '%s\n' "uniagent: 内置网关没开（网关在 talkcode 容器里，它会自己重连过来：talkcode status）" >&2
+        printf '%s\n' "uniagent: 完成。teleport agent 重新注册约 15s，其间 ssh uniagent 会挂住" >&2
+        return 0
+    fi
+
     # 验收 talkcode 的版本读已装包的 package.json，不走 `talkcode --version`：后者在 1.1.0
     # 之前打印的是源码里硬编码的 0.2.0，拿它断言会永远"通过"；现在虽然准了，读文件仍然
     # 不依赖 CLI 能跑起来。
