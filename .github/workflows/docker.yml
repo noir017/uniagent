@@ -5,6 +5,11 @@
 # 拉镜像：
 #   docker pull ghcr.io/noir017/uniagent:latest        # main 最新
 #   docker pull ghcr.io/noir017/uniagent:sha-<短 sha>  # 钉死某次提交
+#   docker pull ghcr.io/noir017/uniagent:lite          # 精简版：只装 opencode + agy（2026-10-29）
+#
+# 精简版（lite）是同一个 Dockerfile 换 AGENTS 构建的：给只当 talkcode 远程主机、不需要
+# claude / codex 的机器用（第一台是 oraclea2）。每次和完整版一起构建，所以 opencode、agy、
+# 基础层永远和完整版同一个提交；tag 是 lite 和 sha-<短 sha>-lite。
 #
 # 部署侧（docker-compose.yml）已经直接用 image: ghcr.io/noir017/uniagent:latest，
 # 不再本地 build —— 更新就是 push main → 等本 workflow 绿 → 目标机
@@ -76,7 +81,7 @@ jobs:
         run: echo "version=$(npm view @anthropic-ai/claude-code version)" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build (${{ matrix.arch }})
+    name: Build (${{ matrix.flavor }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     needs: resolve-claude-version
     outputs:
@@ -89,15 +94,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 各架构用原生 runner，避开 QEMU。本镜像 apt 包多、还要装 Node/Go/多个
+        # npm CLI，模拟会极慢（小时级）。arm64 runner 对公开仓库免费。
+        #
+        # cache 是 GHA 缓存的 scope：完整版沿用原来的 amd64 / arm64，加精简版时不让它的缓存
+        # 白白作废；精简版另起 lite-<arch>，两者 AGENTS 不同，后几层本来就对不上。
         include:
-          # 各架构用原生 runner，避开 QEMU。本镜像 apt 包多、还要装 Node/Go/多个
-          # npm CLI，模拟会极慢（小时级）。arm64 runner 对公开仓库免费。
-          - platform: linux/amd64
-            arch: amd64
-            runner: ubuntu-24.04
-          - platform: linux/arm64
-            arch: arm64
-            runner: ubuntu-24.04-arm
+          - { flavor: full, agents: 'opencode,claude,codex,agy,talkcode', cache: amd64, platform: linux/amd64, arch: amd64, runner: ubuntu-24.04 }
+          - { flavor: full, agents: 'opencode,claude,codex,agy,talkcode', cache: arm64, platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
+          - { flavor: lite, agents: 'opencode,agy', cache: lite-amd64, platform: linux/amd64, arch: amd64, runner: ubuntu-24.04 }
+          - { flavor: lite, agents: 'opencode,agy', cache: lite-arm64, platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -141,11 +147,12 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             CLAUDE_CODE_VERSION=${{ needs.resolve-claude-version.outputs.version }}
+            AGENTS=${{ matrix.agents }}
           labels: ${{ steps.meta.outputs.labels }}
           # scope 按架构分开，避免 amd64 和 arm64 互相覆盖。
           # Dockerfile 刻意把 Go / sshd / gh 拆成独立末层，缓存命中后改这些只重建一层。
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ matrix.cache }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache }}
           # PR 只把缓存写回 GHA，不往 Packages 推。
           # 其它事件按 digest 推，tag 留给 merge job 合成多架构清单。
           outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) }}
@@ -163,16 +170,20 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.arch }}
+          name: digests-${{ matrix.flavor }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    name: Merge and publish
+    name: Merge and publish (${{ matrix.flavor }})
     needs: [build, resolve-claude-version]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [full, lite]
     permissions:
       contents: read
       packages: write
@@ -184,7 +195,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digests-*
+          pattern: digests-${{ matrix.flavor }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -202,10 +213,13 @@ jobs:
           #     `docker compose pull` 就悄悄拉不到新镜像 —— 全绿的静默失败。
           #   - type=sha 用的是 github.sha（触发运行的 commit）。被复用时那不是
           #     真正构建的 commit，tag 会指向错的版本。
+          #   - 精简版只有 lite 和 sha-<短sha>-lite：latest / main 永远指完整版。
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=sha-${{ needs.build.outputs.short_sha }}
+            type=raw,value=latest,enable=${{ matrix.flavor == 'full' && github.ref == 'refs/heads/main' }}
+            type=raw,value=main,enable=${{ matrix.flavor == 'full' && github.ref == 'refs/heads/main' }}
+            type=raw,value=sha-${{ needs.build.outputs.short_sha }},enable=${{ matrix.flavor == 'full' }}
+            type=raw,value=lite,enable=${{ matrix.flavor == 'lite' && github.ref == 'refs/heads/main' }}
+            type=raw,value=sha-${{ needs.build.outputs.short_sha }}-lite,enable=${{ matrix.flavor == 'lite' }}
 
       - name: Log in to GHCR
         uses: docker/login-action@v4

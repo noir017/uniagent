@@ -32,6 +32,11 @@
 > 所有工具都装在 `/usr/local` 或 `/usr` 下，**不在 `$HOME`**，因此不会被 `/home/user` 的
 > bind mount 遮蔽。
 
+**精简版 `ghcr.io/noir017/uniagent:lite`**（2026-10-29 起）：同一个 Dockerfile 用
+`AGENTS=opencode,agy` 构建，不装 Claude Code、Codex、talkcode，其余（Node、Go、uv、Teleport、sshd、
+ttyd、agyacct）都在。给只当 talkcode 远程主机、只跑 oc / agy 的机器用（oraclea2）。每次和完整版一起
+构建（`docker.yml` 的 flavor 矩阵），tag 是 `lite` 和 `sha-<短 sha>-lite`。
+
 ## 目录映射
 
 | 容器内 | 宿主机 |
