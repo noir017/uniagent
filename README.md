@@ -2,16 +2,6 @@
 
 多 AI CLI 一体化开发容器（Debian 12）。
 
-> **unraid 移植版（2026-08-28）**：由 oracle 版移植，构建于 x86_64。容器名 `uniagent`，
-> Teleport 节点名 **`uniagent-unraid`**（`ssh user@uniagent-unraid` 直达，{bot-role} 角色
-> 已放行 `env=dev`）。数据目录 `/mnt/cache/appdata/uniagent/`，Compose Manager 托管
-> （`autostart=true`，indirect 指向本目录）。
-> **与原版差异：不映射直连 sshd 端口**（家里内网走堡垒机 1ms，无性能收益）。要直连时在
-> `docker-compose.yml` 加 `ports: ["{unraid-ip}:22022:22"]`，并把公钥放进
-> `home/.ssh/authorized_keys`（容器内 user 家目录）。其余使用方式（helper 脚本、CLI
-> 登录）与原版一致。原版 README 里关于 Oracle VCN 网络 / EasyTier 的段落不适用于本机。
-
-
 ## 预装
 
 | 组件 | 位置 | 说明 |
@@ -34,7 +24,7 @@
 
 **精简版 `ghcr.io/noir017/uniagent:lite`**（2026-10-29 起）：同一个 Dockerfile 用
 `AGENTS=opencode,agy` 构建，不装 Claude Code、Codex、talkcode，其余（Node、Go、uv、Teleport、sshd、
-ttyd、agyacct）都在。给只当 talkcode 远程主机、只跑 oc / agy 的机器用（oraclea2）。每次和完整版一起
+ttyd、agyacct）都在。给只当 talkcode 远程主机、只跑 oc / agy 的机器用。每次和完整版一起
 构建（`docker.yml` 的 flavor 矩阵），tag 是 `lite` 和 `sha-<短 sha>-lite`。
 
 ## 目录映射
@@ -74,12 +64,6 @@ uniagent --workspace        # 落到 ~/workspace
 > ⚠ **别用 `ua`**：`/usr/bin/ua` 是 ubuntu-advantage(Ubuntu Pro) 的软链，仓库里那个
 > `./ua` 只因带 `./` 前缀才生效，去掉前缀会跑到 Ubuntu Pro 客户端去。`uniagent` 就是
 > 为避开这个重名而起的。`./ua` 保留未动。
-
-**本地（笔记本）直达**：`~/.local/bin/uniagent` 是同名包装脚本，参数完全一致，内部走
-`ssh -t oracle uniagent`。不用 ssh config 里那个 `Host uniagent` 直连，是因为容器停着时
-`ssh uniagent` 会**静默挂死**（Teleport 找不到 node 也不报错）；且容器刚启动后 agent 要
-~13s 才重新注册。包装脚本走 docker exec，冷容器到拿到 shell 实测 1.2s。
-热连两条路差 170ms（直连 690ms / 包装 861ms），确定容器在跑时可以直接 `ssh uniagent`。
 
 各 CLI 首次使用需自行登录（`claude`、`opencode auth login`、`agy`），
 凭据写在 `/home/user` 下，已持久化。SSH 会话里 `agy` 会打印授权 URL，在本地浏览器打开即可。
@@ -122,39 +106,17 @@ profile 存在 `~/.config/agy-accounts/`（持久卷，重建镜像不丢）。�
 agy 自更新后二进制指纹变了会自动重新探测。这一步需要能访问 `oauth2.googleapis.com`；
 不通时 profile 照样能存能切，只是显示 `<未知>`，之后补跑 `agyacct refresh <名字>` 即可。
 
-## 网络：怎么够到家里的堡垒机
-
-集群入口 `teleport.lan.example.com` 只在家庭局域网解析（openwrt 上 dnsmasq 泛解析），
-`ssh_tunnel_public_addr` 是内网 `{openwrt-ip}:3024`，家宽 NAT 无公网入站 —— 云上的容器
-本来拨不进去。现在靠两件事打通：
-
-1. **oracle 宿主机加入了已有的 EasyTier 网络** `{easytier-network}`，vip `{easytier-ip}`，hostname `oracle`。
-   openwrt 那个节点已经导出 `proxy_cidrs = {home-lan-cidr}`（subnet proxy），所以宿主机
-   直接有 `{home-lan-cidr} dev tun0` 的路由。**没有给堡垒机开任何公网端口。**
-   - **所有文件在 `~/apps/easytier`**（二进制/单元/密钥，见那边的 README）；
-     `/etc/systemd/system/easytier.service` 只是指向它的软链
-   - 服务：`systemctl status easytier`；查看拓扑 `sudo ~/apps/easytier/easytier-cli peer|route`
-   - 容器出网靠 docker 自带的 `-s 172.x ! -o br-x -j MASQUERADE`（出 tun0 时源地址自动变成
-     {easytier-ip}），**不需要额外 iptables 规则**
-2. **compose 里 `extra_hosts` 把 FQDN 钉到 `{openwrt-ip}`**。没用 EasyTier 的魔法 DNS
-   （`--accept-dns`）—— 它只给 `<hostname>.et.net`，而 proxy 证书是 LE `*.lan.example.com`，
-   用 et.net 名字连会 SAN 不匹配、只能 `--insecure`。也没把容器 DNS 指向 {openwrt-ip}，
-   否则隧道一断容器里所有 AI CLI 的 DNS 全挂。
-
-副作用（已知并接受）：容器能访问 `{home-lan-cidr}` 全网段。走 relay 到家里 RTT 约 0.5s。
-
 ## Teleport agent（默认不启动）
 
 镜像里只装了二进制，**没有** 任何 join 配置。需要接入时在容器内执行：
 
-token 只能在 openwrt 上签（`docker exec teleport tctl tokens add --type=node --ttl=1h`），
+token 在集群上签（`tctl tokens add --type=node --ttl=1h`），
 ca-pin 可以从公开的 CA 导出接口自己算（等价于 `tctl status` 里那行）：
 
 ```bash
-curl -s "https://teleport.lan.example.com/webapi/auth/export?type=tls-host" \
+curl -s "https://<proxy>/webapi/auth/export?type=tls-host" \
   | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
   | openssl dgst -sha256 -hex | awk '{print "sha256:"$NF}'
-# 当前值：sha256:{ca-pin}
 ```
 
 拿到 token 后在容器里：
@@ -163,10 +125,10 @@ curl -s "https://teleport.lan.example.com/webapi/auth/export?type=tls-host" \
 ./ua
 sudo teleport node configure --silent \
   --output=file:///etc/teleport/teleport.yaml \
-  --proxy=teleport.lan.example.com:443 \
+  --proxy=<proxy>:443 \
   --token=<join token> \
-  --ca-pin=sha256:{ca-pin} \
-  --labels=env=dev,host=oracle,kind=container,arch=arm64 \
+  --ca-pin=<ca-pin> \
+  --labels=env=dev \
   --node-name=uniagent
 ```
 
@@ -177,7 +139,6 @@ sudo teleport node configure --silent \
 让它常驻：把 compose 的 `command` 改成
 `["teleport","start","-c","/etc/teleport/teleport.yaml"]`（`./ua` 走 docker exec，不受影响）；
 临时试跑用 `docker compose exec -d uniagent teleport start -c /etc/teleport/teleport.yaml`。
-集群侧不用改角色：`{admin-role}` 是 `node_labels '*':'*'`、logins 已含 `user`。
 
 配置与 host UUID 分别落在 `teleport/config`、`teleport/data`，容器重建不会重复注册。
 agent 版本需 ≤ 集群 auth 版本；集群是 v18 时保持 `TELEPORT_CHANNEL=stable/v18` 即可。
@@ -194,8 +155,8 @@ uniagent update              # 拉新镜像、重建、清旧镜像；--dry-run 
 跟着变）；比**镜像 ID** 而不是 tag（`latest` 会动，tag 没变不代表镜像没变），没变就一步不走；
 重建前列出容器内除守护会话以外的 tmux 会话并拒绝执行，因为重建会把里面跑着的 coding agent
 一起杀掉；重建后报 talkcode 的**真实**版本（读已装包的 package.json，见下）和守护状态；
-最后清掉被顶替下来的旧镜像（每次 pull 都会留下一个 ~4.5GB 的 dangling 镜像，docker 不回收，
-oracle 上曾一次攒出 24GB）——只按 `org.opencontainers.image.source` 标签清本仓库出的，
+最后清掉被顶替下来的旧镜像（每次 pull 都会留下一个 ~4.5GB 的 dangling 镜像，docker 不回收）
+——只按 `org.opencontainers.image.source` 标签清本仓库出的，
 不碰宿主上别的服务；镜像没变时也清一遍兜底，`--dry-run` 不清。要回滚就把 compose 的 `image:`
 钉到 GHCR 上的 `sha-<短sha>` 再 update，不靠本地留旧镜像。
 
@@ -354,99 +315,42 @@ environment:
 - **升级 ttyd 要同时改 Dockerfile 里 `TTYD_VERSION` 和两个 `TTYD_SHA256_*`**，否则构建当场
   失败 —— 这是故意的，好过悄悄装上一个没人核对过的二进制。
 
-## 直连 sshd：给机器用的旁路（2026-08-20 加）
+## 直连 sshd：给机器用的旁路
 
-### 为什么有这条
-
-Teleport 没有 P2P 旁路，**数据路径必然经过家里的 proxy**。而 runabout 在 oraclea2 上，
-到本容器直线只有 1.8ms —— 走堡垒机却是两次跨洋往返。实测：
-
-| 路径 | 每次新建连接 | ControlMaster 复用 | scp 吞吐 |
-|---|---|---|---|
-| 经家里堡垒机 (`uniagent-tp`) | 11–16s（实测最高 15.6s） | 1.7–3.4s | ~0.4 Mbps |
-| VCN 内网直连 (`uniagent`) | **214ms** | **11ms** | **716 Mbps** |
-
-链路实测：oracle↔oraclea2 走 VCN 内网 = RTT 1.8ms / 0% 丢包 / **997Mbps / MTU 9000**
-（EasyTier 隧道只有 383Mbps / MTU 1360，已弃用）；
-oracle↔家里 openwrt = RTT 342ms / **25% 丢包** / 19Mbps。**丢包才是 11-16s 的真凶**，
-不是带宽 —— 一次 SSH 握手好几个往返，每个往返都可能重传。
-
-那 240ms 里网络只占 12–19ms（TCP+banner 实测），其余是容器内 ssh 客户端进程启动
-+ kex 的本地开销，压不下去；agent 实际走的是复用路径（11ms）。
-
-### 组成
+Teleport 的数据路径要经过 proxy，机器之间频繁新建 ssh 时延迟和丢包会被放大。所以容器里另开一个
+只给机器用的 sshd，人类访问仍走 Teleport。
 
 - `Dockerfile` 第 9 段装 `openssh-server`。**刻意放在最后一层** —— 加进第 1 段的 apt
-  会让后面 7 层（Node / Python / 各 AI CLI）全部缓存失效，重建要几十分钟。
+  会让后面几层（Node / Python / 各 AI CLI）全部缓存失效，重建要几十分钟。
 - `ssh/sshd_config.d/10-direct.conf` → 挂到 `/etc/ssh/sshd_config.d/`。
   属主必须 root（sshd 拒绝加载属主不对的 include）。
-- `ssh/keys/` → 挂到 `/etc/ssh/keys`，**可写**。主机密钥在这里持久化，
-  首次启动由 entrypoint 生成。这样重建镜像不换指纹，否则每次 rebuild 都要
-  重写 oraclea2 那边的 known_hosts。已实测：`docker restart` 后指纹不变。
-- `entrypoint.sh` 在 `exec "$@"` 之前后台启动 sshd。teleport 仍是 exec 的主进程，
-  tini(PID 1) 负责回收。**sshd 的任何一步失败都只警告不退出** —— 不能拖垮 teleport。
+- `ssh/keys/` → 挂到 `/etc/ssh/keys`，**可写**。主机密钥在这里持久化，首次启动由
+  entrypoint 生成，重建镜像不换指纹。
+- `entrypoint.sh` 在 `exec "$@"` 之前后台启动 sshd，**任何一步失败都只警告不退出**。
   代价：sshd 意外退出不会自动拉起，容器重启即恢复。
-- compose 里 `ports: - "{vcn-ip}:22022:22"`（VCN 内网地址 + **30000-40000 之外**的端口）。
+- 默认不发布端口。要用时在 compose 里加 `ports: ["<内网地址>:22022:22"]`，
+  公钥放进 `home/.ssh/authorized_keys`（1001:1001，600）。
 
 ### 安全边界
 
-这条路**没有** Teleport 的角色门禁、会话录制、证书过期。补偿手段全部落在 sshd 上：
+这条路**没有** Teleport 的角色门禁、会话录制、证书过期。补偿手段：
 
-- 监听绑 VCN 内网地址 `{vcn-ip}:22022`。**公网由云侧拦掉**：Oracle 的公网 IP 是到
-  {vcn-ip} 的 1:1 NAT、目的地址区分不了来源，但 OCI 安全列表只对 `0.0.0.0/0` 放通了
-  22 / 80 / 443 / 30000-40000，而 **22022 不在其中**。已实测（sshd 确实在监听时）
-  公网 IPv4 timeout、IPv6 unreachable，对照组公网 22 正常通。
-  → **改这个端口前必须先确认新端口不在安全列表对公网开放的范围内**，否则立刻裸奔。
-- 内网侧靠 OCI 的一条 ingress 规则放通：Source `{vcn-cidr}` / **All Protocols**
-  （OCI 默认**不给**这条，默认只有 22 + ICMP type 3 —— 所以同网段 ping 不通是正常的）。
-- 主机侧第二道防线（`netfilter-persistent save` 已持久化）：
-  ```
-  -A DOCKER-USER -i enp0s6 -s {vcn-cidr} -d 172.16.0.0/12 -p tcp --dport 22 -j RETURN
-  -A DOCKER-USER -i enp0s6              -d 172.16.0.0/12 -p tcp --dport 22 -j DROP
-  ```
-  不引用容器 IP，所以容器/网络重建都不影响。**已验证计数器真的在涨**（3218 包 / 53M）——
-  这是上次踩坑后必做的一步，规则"看起来对"但计数器恒 0 就等于没有。
-- 只认公钥、只允许 `user`、`PermitRootLogin no`。
-- **所有转发能力关闭**（`AllowTcpForwarding` / `AllowAgentForwarding` / `PermitTunnel`
-  / `GatewayPorts` / `X11Forwarding` 全 no）—— 对齐原先 chatgpt 角色的
-  `port_forwarding: false`，否则这把钥匙等于一条进内网的隧道。
-- 授权的公钥只有一把，在 `/home/ubuntu/apps/uniagent/home/.ssh/authorized_keys`
-  （= 容器内 `/home/user/.ssh/`，1001:1001 600），对应
-  `oraclea2:~/apps/runabout/ssh/id_uniagent`。私钥是在 oraclea2 上生成的，从未离开那台机器。
-
-人类访问路径**完全没动**：uniagent 仍然是堡垒机里的 agent 节点，
-`chatgpt` 角色的范围也仍然只有 uniagent（已复验）。
+- 端口只绑内网地址，并**确认该端口不在云安全组对公网放通的范围里**。云主机的公网 IP 常是到
+  内网地址的 1:1 NAT，目的地址区分不了来源，能不能被公网访问完全取决于安全组。
+- 只认公钥、只允许 `user`、`PermitRootLogin no`；所有转发能力关闭（`AllowTcpForwarding` /
+  `AllowAgentForwarding` / `PermitTunnel` / `GatewayPorts` / `X11Forwarding` 全 no），
+  否则这把钥匙等于一条进内网的隧道。
 
 ### 坑
 
-- **开机竞态**：tun0 还没起来时 docker 绑不上这个地址，容器起不来，报
-  `failed to bind host port {easytier-ip}:30022/tcp: cannot assign requested address`
-  （已实测确认）。`restart: unless-stopped` 会重试，easytier.service 就绪后自愈。
-  手工恢复：`systemctl status easytier && docker compose up -d`。
+- **DNAT 在 PREROUTING 完成，filter 表看到的目的端口已经是容器端口。** 按宿主机端口写的
+  `DOCKER-USER` 规则**永远匹配不到**，要按 DNAT **之后**的形态匹配（`--dport 22` +
+  容器网段/网卡）。写完看一眼计数器，恒为 0 就等于没有。
 - **authorized_keys 别用 `printf '%s\n' "a\nb"` 写** ——`\n` 在 `%s` 里是字面量，
   整个文件会挤成一行，表现是 `Permission denied (publickey)`。用 heredoc。
-- **绑 VCN 地址时端口的选择就是安全边界。** Oracle 公网 IP 是到 {vcn-ip} 的 **1:1 NAT**，
-  地址区分不了来源，所以能不能被公网访问**完全取决于端口是否落在安全列表对
-  `0.0.0.0/0` 放通的范围里**。2026-08-20 用 30022（在放通的 30000-40000 内）实测过：
-  公网 `{oracle-public-ip}:30022` 直接返回了容器 banner
-  `SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u10`。换到 22022 后公网 timeout。
-- **DNAT 在 PREROUTING 完成，filter 表看到的目的端口已经是容器端口。**
-  所以按 `--dport 30022` 写的 `DOCKER-USER` 规则**永远匹配不到**（当场踩过：
-  规则在那儿，计数器恒为 0，公网照样进得来）。要在 DOCKER-USER 里挡，必须按
-  DNAT **之后**的形态匹配（`--dport 22` + 容器网段/网卡）。
-  反过来，按 30022 写的 `INPUT` 规则只在**没有 DNAT**命中时才生效。
-- **两台机器同在 VCN 的 {vcn-cidr}**（oracle / oraclea2），TCP 直通，
-  但 **ICMP 被 OCI 安全列表挡掉** —— ping 不通不代表网络不通，别用 ping 判断。
 
-### 撤销（回到只走 Teleport）
-
-```sh
-# 1. 吊销钥匙。sshd 每次认证都重读，不用重启容器
-sudo rm /home/ubuntu/apps/uniagent/home/.ssh/authorized_keys
-# 2. 彻底不再监听：注释掉 docker-compose.yml 里的 ports 段（{vcn-ip}:22022）
-cd ~/apps/uniagent && docker compose up -d
-# 3. oraclea2 那边把 ssh/config 里的 uniagent-tp 改回 uniagent
-```
+撤销：删掉 `authorized_keys`（sshd 每次认证都重读，不用重启容器），再去掉 compose 里的
+`ports` 段 `docker compose up -d`。
 
 ## License
 

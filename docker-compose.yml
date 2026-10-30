@@ -1,23 +1,18 @@
 services:
   uniagent:
     # 镜像由 CI 编译发布（.github/workflows/docker.yml），本地不 build：
-    # 这个镜像单架构就要十几分钟，unraid 现编译纯属浪费，而且两台机器编出来的
-    # 东西没法保证一致。更新流程：改 Dockerfile → push main → 等 CI → 这里
+    # 这个镜像单架构就要十几分钟，而且各机器编出来的东西没法保证一致。
+    # 更新流程：改 Dockerfile → push main → 等 CI → 这里
     # docker compose pull && docker compose up -d。
     # 要钉死某次提交就把 latest 换成 sha-<短 sha>。
     image: ghcr.io/noir017/uniagent:latest
     container_name: uniagent
-    hostname: uniagent-unraid
+    hostname: uniagent
     restart: always
     init: false
-    labels:                      # Unraid dashboard integration（compose 管理的栈）
-      net.unraid.docker.managed: "composeman"
-      net.unraid.docker.icon: "http://{unraid-ip}:50560/icons/upload/uniagent.png"
-    # 不映射直连端口（2026-08-28 部署时用户确认）：unraid 在家内网，家里机器走
-    # Teleport 堡垒机（{openwrt-ip}）延迟 ~1ms，直连 sshd 无性能收益，反而多一个
-    # LAN 攻击面。容器内 sshd 照常运行（Dockerfile 第 9 层装的），哪天要直连，
-    # 在这里补 ports: ["{unraid-ip}:22022:22"] 即可。
-    command: ["teleport","start","-c","/etc/teleport/teleport.yaml"]
+    # 直连 sshd 默认不发布端口，要用见 README「直连 sshd」。
+    # 接入 Teleport 后让它常驻（见 README「Teleport agent」）：
+    # command: ["teleport","start","-c","/etc/teleport/teleport.yaml"]
     environment:
       - TZ=Asia/Shanghai
       - USERNAME=user
@@ -43,10 +38,6 @@ services:
       # sshd 主机密钥：可写，首次启动由 entrypoint 生成；持久化=重建镜像不换指纹
       - ./ssh/keys:/etc/ssh/keys
     working_dir: /home/user
-    # 家里 dnsmasq 泛解析 *.lan.example.com -> {openwrt-ip}，这里显式钉住，
-    # 不依赖容器 DNS（与 oracle 版一致）
-    extra_hosts:
-      - "teleport.lan.example.com:{openwrt-ip}"
     # 交互式工具（opencode / claude / codex / agy 的 TUI）需要 tty
     stdin_open: true
     tty: true

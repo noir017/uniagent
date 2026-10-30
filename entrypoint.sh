@@ -38,7 +38,7 @@ mkdir -p /var/lib/teleport
 if [ -x /usr/sbin/sshd ]; then
     mkdir -p /run/sshd /etc/ssh/keys
     chmod 755 /run/sshd
-    # 主机密钥落在宿主机挂进来的目录里，重建镜像不换指纹（否则 runabout 的
+    # 主机密钥落在宿主机挂进来的目录里，重建镜像不换指纹（否则客户端的
     # known_hosts 每次 rebuild 都要重写）。
     if [ ! -f /etc/ssh/keys/ssh_host_ed25519_key ]; then
         echo "[entrypoint] 生成持久化 sshd 主机密钥"

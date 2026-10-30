@@ -22,11 +22,7 @@
 #                            还开着的 tmux 会话）
 set -euo pipefail
 
-# compose 目录。默认是 oracle 的 —— 2026-09-05 起 oracle 上这个就是全机群唯一的 uniagent。
-# 这里曾写死 unraid 的 /mnt/cache/appdata/uniagent，oracle 那份靠手工改这一行（以及下面两处
-# `ssh uniagent-unraid`）才能用，于是 2026-10-10 拿仓库版本覆盖宿主机副本时，update 当场报
-# 「找不到 /mnt/cache/appdata/uniagent/docker-compose.yml」。仓库版本要能原样装上唯一那台机器；
-# 别的地方用就设 UNIAGENT_APP_DIR，而不是改这一行。
+# compose 目录。别的地方用就设 UNIAGENT_APP_DIR，而不是改这一行。
 APP_DIR="${UNIAGENT_APP_DIR:-/home/ubuntu/apps/uniagent}"
 CONTAINER=uniagent
 CT_USER=user
@@ -36,7 +32,7 @@ die() { printf '%s\n' "uniagent: $*" >&2; exit 1; }
 _short() { local id="${1#sha256:}"; printf '%s' "${id:0:12}"; }
 
 # 清掉被新版顶替下来的旧镜像。每次 pull 到新的 latest，旧镜像就丢了 tag 变成 dangling
-# （一个约 4.5GB），docker 不会自己回收 —— 2026-09-19 在 oracle 上一次清出 18 个、24GB。
+# （一个约 4.5GB），docker 不会自己回收。
 #
 # 只清这个仓库 CI 出的镜像：按 CI 打的 org.opencontainers.image.source 标签筛，宿主上
 # 别的服务留下的 dangling 镜像不归这里管。prune 不删仍被任何容器（含停着的）引用的

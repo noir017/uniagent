@@ -145,7 +145,7 @@ RUN set -eux; \
       > /etc/profile.d/10-uniagent.sh; \
     printf '%s\n' \
       'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH";; esac' \
-      "PS1='\\[\\e[32m\\]\\u@uniagent-unraid\\[\\e[0m\\]:\\[\\e[34m\\]\\w\\[\\e[0m\\]\$ '" \
+      "PS1='\\[\\e[32m\\]\\u@uniagent\\[\\e[0m\\]:\\[\\e[34m\\]\\w\\[\\e[0m\\]\$ '" \
       "alias ll='ls -alF'" \
       >> /home/${USERNAME}/.bashrc; \
     chown ${USERNAME}:${USERNAME} /home/${USERNAME}/.bashrc; \
@@ -153,10 +153,9 @@ RUN set -eux; \
     cp -a /home/${USERNAME}/. /opt/home-skel/
 
 # ---------- 9. sshd（只给机器直连用，人类仍走 Teleport）----------
-# 背景：Teleport 没有 P2P 旁路，数据路径必然经过家里的 proxy。runabout(oraclea2)
-# 到本容器直线只有 1.8ms，绕家里却是 2 次 342ms/25% 丢包的跨洋往返（实测每次
-# 新建 ssh 11-16s）。所以给机器开一条直连：sshd 只绑到宿主机的 EasyTier 地址，
-# 公网与 Oracle 公有 IP 都碰不到；人类访问不变，仍走堡垒机（有角色门禁+录制）。
+# 背景：Teleport 的数据路径要经过 proxy，机器之间频繁新建 ssh 时延迟和丢包会被放大。
+# 所以给机器开一条直连：sshd 只绑宿主机的内网地址，公网碰不到；人类访问不变，
+# 仍走 Teleport（有角色门禁+录制）。
 #
 # 刻意放在最后一层：加在第 1 段的 apt 里会让后面 7 层（Node/Python/各 AI CLI）
 # 全部失效，重建要几十分钟；放这里只重建这一层。

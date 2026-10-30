@@ -13,9 +13,6 @@
   Safe to re-run: every config file is backed up before it is touched, and the
   entry is simply refreshed.
 
-  NOTE the memory server lives on the home LAN ({openwrt-ip}). This only works
-  when the laptop is on that network or on a VPN back to it.
-
 .PARAMETER ApiUrl
   Hindsight API base URL.
 
@@ -26,11 +23,11 @@
   Skip the connectivity and end-to-end checks.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\install-hindsight-recall.ps1
+  powershell -ExecutionPolicy Bypass -File .\install-hindsight-recall.ps1 -ApiUrl https://<your-hindsight-api>
 #>
 [CmdletBinding()]
 param(
-  [string]$ApiUrl = 'https://hindsight-api.lan.example.com',
+  [Parameter(Mandatory = $true)][string]$ApiUrl,
   [string]$Bank   = 'agent',
   [switch]$SkipTest
 )
@@ -86,8 +83,7 @@ if (-not $SkipTest) {
     Good "reachable ($([int]$sw.ElapsedMilliseconds) ms)"
   } catch {
     Warn "cannot reach $ApiUrl"
-    Say  "That server is on the home LAN ({openwrt-ip}). Off the home network"
-    Say  "you need a VPN back to it, or the API exposed on a public hostname."
+    Say  "Check the URL and that this machine can reach it."
     Say  "Install will continue - the tool simply returns an error until you can reach it."
   }
 }

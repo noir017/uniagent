@@ -83,7 +83,7 @@ Verify with `claude mcp list`, `opencode mcp list`, `agy mcp list` — each shou
 config before touching it:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install-hindsight-recall.ps1
+powershell -ExecutionPolicy Bypass -File .\install-hindsight-recall.ps1 -ApiUrl https://<your-hindsight-api>
 ```
 
 Three things that cost a debugging round each, kept here so they are not re-learned:
@@ -98,7 +98,3 @@ Three things that cost a debugging round each, kept here so they are not re-lear
 - **`claude` / `opencode` / `node` write banners to stderr**, which under
   `$ErrorActionPreference = 'Stop'` is raised as a terminating `NativeCommandError`.
   The verification step relaxes it, or a working install reports as a failure.
-
-The memory server resolves to `{openwrt-ip}` — a LAN address, even from public DNS —
-so a laptop reaches it only from the home network or a VPN back to it. The installer
-checks and says so rather than leaving you to wonder.

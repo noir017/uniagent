@@ -8,7 +8,7 @@
 #   docker pull ghcr.io/noir017/uniagent:lite          # 精简版：只装 opencode + agy（2026-10-29）
 #
 # 精简版（lite）是同一个 Dockerfile 换 AGENTS 构建的：给只当 talkcode 远程主机、不需要
-# claude / codex 的机器用（第一台是 oraclea2）。每次和完整版一起构建，所以 opencode、agy、
+# claude / codex 的机器用。每次和完整版一起构建，所以 opencode、agy、
 # 基础层永远和完整版同一个提交；tag 是 lite 和 sha-<短 sha>-lite。
 #
 # 部署侧（docker-compose.yml）已经直接用 image: ghcr.io/noir017/uniagent:latest，

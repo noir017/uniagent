@@ -7,7 +7,7 @@
 #>
 param(
   [string]$Query  = 'talkcode 发布流程',
-  [string]$ApiUrl = 'https://hindsight-api.lan.example.com',
+  [Parameter(Mandatory = $true)][string]$ApiUrl,
   [string]$Bank   = 'agent'
 )
 
