@@ -222,7 +222,7 @@ RUN set -eux; \
 # 版本 ARG 留在 Dockerfile（供 bump-talkcode.yml sed 改写），以环境变量透给脚本。
 ARG AGENTS="opencode,claude,codex,agy,talkcode"
 ARG TALKCODE_VERSION=2.12.0
-ARG TALKCODE_SHA256=8964bfa378edaf474fea3c8f2563b678ef110a50eb5b411d12ab968e035df3cc
+ARG TALKCODE_SHA256=24cd87011bbf89a836528364815a45648c4a7e84c414dea6869955ec0601b898
 COPY agents/ /opt/agents/
 COPY codex/config.toml /opt/codex-config/config.toml
 RUN set -eux; \
