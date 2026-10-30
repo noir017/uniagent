@@ -101,6 +101,9 @@ RUN set -eux; \
 # codex-acp 时必须回来同步它，下面的断言会在版本漂移时让构建当场失败，而不是
 # 悄悄把镜像撑大 300 MB。
 #
+# 0.165.0：codex-acp 2.5.0 把依赖改成了 ^0.165.0，0.164.0 从那一刻起挂在断言上，
+# 挡住了 talkcode 2.10.0 和 2.11.0 的 full 镜像（bump run 40996246592）。0.165.0 是 0.165 唯一的版本；
+# 它和 codex-acp 2.5.0 在临时 prefix 里装出单份 codex，ACP 握手正常、仍声明 steering（2026-10-30）。
 # 0.164.0：codex-acp 2.3.0 把依赖改成了 ^0.164.0，0.160.1 从那一刻起挂在断言上。
 # 0.164.0 和 codex-acp 2.3.0 在临时 prefix 里实测装出单份 codex（2026-10-27）。
 # 0.160.1：codex-acp 2.2.1（2026-10-10）把依赖改成了 ^0.160.1，0.159.2 从那一刻起挂在断言上，
@@ -117,7 +120,7 @@ RUN set -eux; \
 # 的 cx 链路实跑：握手、模型/effort 上报、INITIAL_AGENT_MODE=agent-full-access 下执行
 # 命令、/model 与 /effort 的选项列表、连续两轮，均正常（2026-09-29）。
 # 更早：0.156.1 对 codex-acp 1.13.1（2026-09-23）。
-ARG CODEX_VERSION=0.164.0
+ARG CODEX_VERSION=0.165.0
 # 安装命令已拆到 agents/opencode.sh、agents/claude.sh、agents/codex.sh，
 # 见下面"agents 组合层"（按 AGENTS 按需安装）。
 
