@@ -53,6 +53,10 @@ RUN set -eux; \
     node -v; npm -v
 
 # ---------- 3. Teleport agent ----------
+# 包里 5 个二进制 704 MB，这里只留 teleport（agent，PID 1）和 tsh（容器里连别的节点要用），
+# 连同 tsh 要的 fdpass-teleport。删掉的三个容器里用不上：tctl 是管 auth 的，tbot 该跑在宿主机
+# 上（机器身份不进容器），teleport-update 要 systemd。省 259 MB。
+# 同一个 RUN 里删，才真的不进镜像。
 RUN set -eux; \
     curl -fsSL https://apt.releases.teleport.dev/gpg \
         -o /usr/share/keyrings/teleport-archive-keyring.asc; \
@@ -61,68 +65,16 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends teleport=${TELEPORT_VERSION}; \
     rm -rf /var/lib/apt/lists/*; \
-    teleport version
+    for b in tctl tbot teleport-update; do \
+        rm -f "/opt/teleport/system/bin/${b}" "/usr/local/bin/${b}"; \
+    done; \
+    teleport version; tsh version
 
 # ---------- 4. uv (装到 /usr/local/bin，不落在 $HOME) ----------
 RUN set -eux; \
     curl -fsSL https://astral.sh/uv/install.sh \
         | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh; \
     uv --version; uvx --version
-
-# ---------- 4b. Go (官方 tarball，Debian 源里的 1.19 太老) ----------
-# 装到 /usr/local/go，不落在 $HOME，不会被 /home/user 的 bind mount 遮蔽。
-# 升级 Go 只需改 GO_VERSION 并重建：单独一层，只重建这一层。
-ARG GO_VERSION=1.27.0
-RUN set -eux; \
-    arch="$(dpkg --print-architecture)"; \
-    case "$arch" in \
-        amd64) goarch=amd64 ;; \
-        arm64) goarch=arm64 ;; \
-        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${goarch}.tar.gz" -o /tmp/go.tgz; \
-    tar -C /usr/local -xzf /tmp/go.tgz; \
-    rm /tmp/go.tgz; \
-    ln -sf /usr/local/go/bin/go /usr/local/bin/go; \
-    ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
-    go version
-
-# ---------- 5. AI CLI（npm 全局，落在 /usr/lib/node_modules）----------
-#
-# codex 这一对必须同命令、同版本地装，否则镜像里会有两份 codex。
-# @agentclientprotocol/codex-acp 是 talkcode 的 harness=codex 启动的 ACP 适配器
-# （替代已废弃的 @zed-industries/codex-acp），它把 @openai/codex 声明成普通依赖，
-# 而 npm 对 0.x 版本的 caret 是锁次版本号的：^0.160.1 等价于 >=0.160.1 <0.161.0。
-# 所以顶层若是别的次版本，codex-acp 会在自己的 node_modules 里再嵌一份匹配的
-# @openai/codex —— 连同它 ~284 MB 的平台二进制。实测（0.155.1 那一代）：去重后
-# /usr/lib/node_modules 是 301 MB，不钉是 613 MB。
-#
-# 因此 CODEX_VERSION 不是"想用哪个版本"，而是"codex-acp 依赖哪个版本"。升级
-# codex-acp 时必须回来同步它，下面的断言会在版本漂移时让构建当场失败，而不是
-# 悄悄把镜像撑大 300 MB。
-#
-# 0.165.0：codex-acp 2.5.0 把依赖改成了 ^0.165.0，0.164.0 从那一刻起挂在断言上，
-# 挡住了 talkcode 2.10.0 和 2.11.0 的 full 镜像（bump run 40996246592）。0.165.0 是 0.165 唯一的版本；
-# 它和 codex-acp 2.5.0 在临时 prefix 里装出单份 codex，ACP 握手正常、仍声明 steering（2026-10-30）。
-# 0.164.0：codex-acp 2.3.0 把依赖改成了 ^0.164.0，0.160.1 从那一刻起挂在断言上。
-# 0.164.0 和 codex-acp 2.3.0 在临时 prefix 里实测装出单份 codex（2026-10-27）。
-# 0.160.1：codex-acp 2.2.1（2026-10-10）把依赖改成了 ^0.160.1，0.159.2 从那一刻起挂在断言上，
-# 挡住了 talkcode 改名后的第一个镜像（Docker run 38016445866）。0.160.1 是 0.160 唯一的版本；
-# 它和 codex-acp 2.2.1 在临时 prefix 里装出单份 codex，并经 talkcode 2.0.0 的 cx 链路实跑：
-# INITIAL_AGENT_MODE=agent-full-access 下执行命令和写文件、反向命令、/effort 与 /model 的选项
-# 列表、连续两轮，均正常（2026-10-10）。
-# 0.159.2：codex-acp 2.0.1（2026-09-29，补丁版）把依赖改成了 ^0.159.1，0.158.0 从那一刻起
-# 同样挂在断言上（talkcode 1.36.0、1.36.1 因此没进镜像）。0.159.2 + codex-acp 2.0.1
-# 已在临时 prefix 里实测装出单份 codex，并经 ACP 握手、建会话、跑一轮验证（2026-09-30）。
-# 0.158.0：codex-acp 2.0.0（2026-09-28，大版本号）把依赖改成了 ^0.158.0，
-# 0.156.1 从那一刻起每次构建都挂在断言上（talkcode 1.34.2 因此没进镜像）。
-# 0.158.0 + codex-acp 2.0.0 已在临时 prefix 里实测装出单份 codex，并经 talkcode
-# 的 cx 链路实跑：握手、模型/effort 上报、INITIAL_AGENT_MODE=agent-full-access 下执行
-# 命令、/model 与 /effort 的选项列表、连续两轮，均正常（2026-09-29）。
-# 更早：0.156.1 对 codex-acp 1.13.1（2026-09-23）。
-ARG CODEX_VERSION=0.165.0
-# 安装命令已拆到 agents/opencode.sh、agents/claude.sh、agents/codex.sh，
-# 见下面"agents 组合层"（按 AGENTS 按需安装）。
 
 # ---------- 6. 用户 user（可 sudo）----------
 RUN set -eux; \
@@ -132,9 +84,6 @@ RUN set -eux; \
     echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-${USERNAME}; \
     chmod 0440 /etc/sudoers.d/90-${USERNAME}; \
     install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.local/bin /home/${USERNAME}/workspace
-
-# ---------- 7. Antigravity CLI (agy) ----------
-# 安装命令已拆到 agents/agy.sh，见下面"agents 组合层"（按 AGENTS 按需安装）。
 
 # ---------- 8. 环境与骨架 ----------
 RUN set -eux; \
@@ -179,8 +128,8 @@ RUN chmod +x /usr/local/sbin/entrypoint.sh
 # 所有 Linux 安装都要现场编译）、xterm.js、WebSocket 服务端，外加 scrollback / resize /
 # 重连 / 手机软键盘。ttyd 是 1.3MB 静态二进制，这些连同 CJK 与 IME 支持全都现成。
 #
-# Debian bookworm 源里没有 ttyd（只在 sid），所以走 release 静态二进制，和上面 Go、
-# teleport 同一个路子。校验和逐架构写死：改版本必须同时改这两行，否则构建当场失败，而不是
+# Debian bookworm 源里没有 ttyd（只在 sid），所以走 release 静态二进制，和 agents/go.sh
+# 装 Go 同一个路子。校验和逐架构写死：改版本必须同时改这两行，否则构建当场失败，而不是
 # 悄悄装上一个没人核对过的二进制。
 ARG TTYD_VERSION=1.7.7
 ARG TTYD_SHA256_AMD64=8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55
@@ -214,63 +163,52 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     gh --version
 
-# ---------- 11. agents 组合层（按 AGENTS 按需安装）----------
-#   全量：  --build-arg AGENTS="opencode,claude,codex,agy,talkcode"
-#   精简：  --build-arg AGENTS="opencode,claude"
-# 每个 agent 独立一层：升级 opencode 只重建 opencode 层，前面全走缓存。
-# 只有 codex 例外：codex 与 codex-acp 必须同装（见 agents/codex.sh），故合并为一个 token。
-# 版本 ARG 留在 Dockerfile（供 bump-talkcode.yml sed 改写），以环境变量透给脚本。
-ARG AGENTS="opencode,claude,codex,agy,talkcode"
+# ---------- 11. 可选工具（装在持久卷 /opt/ua，不进镜像）----------
+# opencode / claude / codex / agy / talkcode / Go 压缩后合计 ~650 MB、解压后 ~2 GB，曾占镜像的
+# 一大半。现在镜像里只有安装器（bin/ua-tools + agents/*.sh）和版本钉子（pins.env），本体由
+# ua-tools 装进 /opt/ua（compose 挂宿主机 ./tools）：换镜像不用重下，各机器用 compose 的
+# UNIAGENT_TOOLS 选装。entrypoint 每次启动在后台跑 `ua-tools sync`，补齐缺的、把钉死的版本
+# 对齐到这个镜像；uniagent update 换容器之前也先用新镜像预装一遍。细节见 bin/ua-tools 开头。
+#
+# UNIAGENT_TOOLS 这个 ARG 是 compose 没设时的默认清单（CI 的 lite 传 opencode,agy,go）。
+# 版本 ARG 留在 Dockerfile（bump-talkcode.yml 用 sed 改写 TALKCODE_*），写进 pins.env 给 ua-tools。
+# CLAUDE_CODE_VERSION 由 CI 解析成 npm latest 的具体版本传进来，所以「镜像里是构建那天的 claude」
+# 和以前一样；本地构建不传就是 latest（装上以后只在 `ua-tools update` 时升）。
+ARG UNIAGENT_TOOLS="opencode,claude,codex,agy,talkcode,go"
 ARG TALKCODE_VERSION=2.16.0
 ARG TALKCODE_SHA256=3980c82d027dac42bd6734929c69ce4ea94681359ed31bb74192e39e11433d6b
-COPY agents/ /opt/agents/
-COPY codex/config.toml /opt/codex-config/config.toml
-RUN set -eux; \
-    rest="${AGENTS},"; \
-    while [ -n "${rest}" ]; do \
-        a="${rest%%,*}"; rest="${rest#*,}"; \
-        case ",opencode,claude,codex,agy,talkcode," in \
-            *,"${a}",*) ;; \
-            *) echo "unknown agent in AGENTS: $a (want: opencode,claude,codex,agy,talkcode)" >&2; exit 1 ;; \
-        esac; \
-    done
-RUN set -eux; \
-    case ",${AGENTS}," in *,opencode,*) \
-        bash /opt/agents/opencode.sh ;; \
-    esac; \
-    npm cache clean --force
-RUN set -eux; \
-    case ",${AGENTS}," in *,codex,*) \
-        export CODEX_VERSION; bash /opt/agents/codex.sh ;; \
-    esac; \
-    npm cache clean --force
-RUN set -eux; \
-    case ",${AGENTS}," in *,agy,*) \
-        export USERNAME; bash /opt/agents/agy.sh ;; \
-    esac
-RUN set -eux; \
-    case ",${AGENTS}," in *,talkcode,*) \
-        export TALKCODE_VERSION TALKCODE_SHA256 AGENTS; bash /opt/agents/talkcode.sh ;; \
-    esac; \
-    npm cache clean --force
-# 预置配置跟随 agent 走：没选 codex 就不播种 ~/.codex。
-RUN set -eux; \
-    case ",${AGENTS}," in *,codex,*) \
-        install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.codex /opt/home-skel/.codex; \
-        cp /opt/codex-config/config.toml /home/${USERNAME}/.codex/config.toml; \
-        cp /opt/codex-config/config.toml /opt/home-skel/.codex/config.toml; \
-        chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.codex /opt/home-skel/.codex ;; \
-    esac; \
-    rm -rf /opt/codex-config
-
-
+ARG GO_VERSION=1.27.0
 ARG CLAUDE_CODE_VERSION=latest
+COPY agents/ /usr/local/lib/ua-tools/
+COPY codex/config.toml /usr/local/share/ua-tools/codex-config.toml
+COPY bin/ua-tools /usr/local/bin/ua-tools
+# /usr/local/bin 下的命令软链（stubs）在这里一次建好，指向 /opt/ua/<工具>/current；没装的悬空。
+# /opt/ua 预先建好并归 user：忘了挂卷时照样能装（只是进了容器层，重建就没了）。
+# 最后以 user 跑一次 list：默认清单里写错了工具名，构建当场失败。
 RUN set -eux; \
-    case ",${AGENTS}," in *,claude,*) \
-        export CLAUDE_CODE_VERSION; bash /opt/agents/claude.sh ;; \
-    esac; \
-    npm cache clean --force; \
-    rm -rf /opt/agents
+    chmod +x /usr/local/bin/ua-tools; \
+    bash -n /usr/local/bin/ua-tools; \
+    for f in /usr/local/lib/ua-tools/*.sh; do bash -n "$f"; done; \
+    printf '%s\n' \
+      "UA_DEFAULT_TOOLS=${UNIAGENT_TOOLS}" \
+      "TALKCODE_VERSION=${TALKCODE_VERSION}" \
+      "TALKCODE_SHA256=${TALKCODE_SHA256}" \
+      "GO_VERSION=${GO_VERSION}" \
+      "CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}" \
+      > /usr/local/share/ua-tools/pins.env; \
+    install -d -o ${USERNAME} -g ${USERNAME} /opt/ua; \
+    ua-tools stubs; \
+    runuser -u ${USERNAME} -- ua-tools list
+# talkcode 的 cc harness 要靠 CLAUDE_CODE_EXECUTABLE 找 claude（SDK 自带的那份在 agents/talkcode.sh
+# 里删了）。也写进登录环境（2026-10-29）：talkcode 搬进自己的容器以后，cc 是网关经 ssh 远程起的，
+# 环境取的是这里的**登录环境**（talkcode-remote 跑 `bash -i -l -c`），不经过 talkcode-daemon.sh，
+# 也看不到 Dockerfile 的 ENV。不写的话远程 cc 第一句话就报 "Claude native binary not found"。
+# 只在 claude 真装了时才设：指向一个不存在的路径，会把清楚的报错变成看不懂的 ENOENT。
+RUN printf '%s\n' \
+      'CLAUDE_UA_EXE=/opt/ua/claude/current/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe' \
+      '[ -n "${CLAUDE_CODE_EXECUTABLE:-}" ] || [ ! -x "$CLAUDE_UA_EXE" ] || export CLAUDE_CODE_EXECUTABLE="$CLAUDE_UA_EXE"' \
+      'unset CLAUDE_UA_EXE' \
+      > /etc/profile.d/20-claude-code.sh
 
 # ssh 登录会话的语言环境（2026-10-29）。上面 ENV 里的 LC_ALL 只有容器 PID 1 的子孙看得到；
 # talkcode 搬进自己的容器以后，这里的 agent 是网关经 ssh 远程起的，环境取的是登录环境

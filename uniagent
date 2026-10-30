@@ -17,9 +17,9 @@
 #   uniagent --root          以 root 进入（装包用；user 本身也有免密 sudo）
 #   uniagent --workspace     直接落到 ~/workspace
 #   uniagent --status        只看容器状态，不进入
-#   uniagent update          拉 GHCR 上的新镜像并重建容器，再清掉被顶替下来的旧镜像
-#                            （--dry-run 只看会不会动、不清理，--force 无视容器内
-#                            还开着的 tmux 会话）
+#   uniagent update          拉 GHCR 上的新镜像，先用它把工具预装进 ./tools，再重建容器，
+#                            最后清掉被顶替下来的旧镜像（--dry-run 只看会不会动、不预装
+#                            不清理，--force 无视容器内还开着的 tmux 会话）
 set -euo pipefail
 
 # compose 目录。别的地方用就设 UNIAGENT_APP_DIR，而不是改这一行。
@@ -57,6 +57,27 @@ prune_old_images() {
         ''|0B) printf '%s\n' "uniagent: 没有要清的旧镜像" >&2 ;;
         *)     printf '%s\n' "uniagent: 已清掉被顶替的旧镜像，回收 ${freed}" >&2 ;;
     esac
+}
+
+# 换容器之前，先用新镜像把它要的工具装进 ./tools（bin/ua-tools 的 sync）。各 agent 和 Go 不在
+# 镜像里，在持久卷里；不预装的话，新容器起来以后才在后台现装 —— talkcode 换版本那几十秒、
+# 或者第一次切到持久卷时那 1-2 GB，期间 coding agent 全都用不了。
+#
+# 用 compose run 而不是 docker run：卷、环境（UNIAGENT_TOOLS）都和正式容器一字不差。
+# 失败只告警、照样换：ua-tools 装失败不切 current，新容器先用原来的版本，起来以后还会再试。
+presync_tools() {
+    if ! grep -q ':/opt/ua' "${APP_DIR}/docker-compose.yml"; then
+        printf '%s\n' "uniagent: compose 里没挂 /opt/ua（./tools:/opt/ua），跳过预装；新容器每次重建都要重下工具" >&2
+        return 0
+    fi
+    local svc
+    svc="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "${CONTAINER}" 2>/dev/null || true)"
+    # 先由宿主机用户建好：让 docker 代建的话属主是 root，容器里的 user 写不进去。
+    mkdir -p "${APP_DIR}/tools"
+    printf '%s\n' "uniagent: 用新镜像预装工具（ua-tools sync）…" >&2
+    (cd "${APP_DIR}" && docker compose run --rm --no-deps -T -u user \
+        --entrypoint /usr/local/bin/ua-tools "${svc:-uniagent}" sync) >&2 \
+        || printf '%s\n' "uniagent: !! 预装有失败（见上），继续换容器：失败的工具停在原来的版本，新容器起来后会再试" >&2
 }
 
 # ---- update：拉新镜像并重建容器 ----
@@ -128,6 +149,8 @@ do_update() {
         return 0
     fi
 
+    presync_tools
+
     (cd "${APP_DIR}" && docker compose up -d) >&2 \
         || die "up -d 失败，看 cd ${APP_DIR} && docker compose logs"
 
@@ -155,7 +178,7 @@ do_update() {
     # 不依赖 CLI 能跑起来。
     local aa
     aa="$(docker exec -u "${CT_USER}" "${CONTAINER}" \
-        node -p "require('/usr/lib/node_modules/talkcode/package.json').version" 2>/dev/null)" \
+        node -p "require('/opt/ua/talkcode/current/lib/node_modules/talkcode/package.json').version" 2>/dev/null)" \
         || aa="读不到"
     printf '%s\n' "uniagent: talkcode ${aa}" >&2
 

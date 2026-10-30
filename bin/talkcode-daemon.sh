@@ -23,12 +23,13 @@ DAEMON_SESSION="talkcode-daemon"
 APP_DIR="$HOME/.config/talkcode"
 LOG="$APP_DIR/daemon.log"
 
-# The binary baked into the image. Overridable so a private build can be tried
-# without rebuilding the image:  TALKCODE_BIN=~/.local/bin/talkcode ...
+# The image's fixed link into the persistent tool volume (/opt/ua/talkcode/current,
+# installed by ua-tools). Overridable so a private build can be tried without
+# touching that:  TALKCODE_BIN=~/.local/bin/talkcode ...
 # Note that $HOME/.local/bin comes FIRST in PATH, so a leftover install there
 # would win for anything resolving by name — this script deliberately does not,
 # which is why the override has to be explicit.
-BIN="${TALKCODE_BIN:-/usr/bin/talkcode}"
+BIN="${TALKCODE_BIN:-/usr/local/bin/talkcode}"
 
 # Absolute path to this script: _supervise re-invokes it inside tmux, where the
 # caller's cwd no longer applies.
@@ -41,12 +42,12 @@ PATTERN="$BIN start"
 
 # The claude harness runs the Claude Code CLI through the Agent SDK, and the SDK
 # ships its own ~222 MB copy of that CLI as optional deps. agents/talkcode.sh
-# installs without them (the global `claude` is the same binary — verified with
+# deletes them when claude is installed (it is the same binary — verified with
 # cmp at 2.1.280), so the SDK has to be told where the one that is left lives;
 # without this every cc turn fails with "Claude native binary not found".
 # Only set when the file is really there: pointing the SDK at a missing path
 # would turn a clear error into a confusing ENOENT. An explicit value wins.
-CLAUDE_GLOBAL_EXE="/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+CLAUDE_GLOBAL_EXE="/opt/ua/claude/current/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
 if [ -z "${CLAUDE_CODE_EXECUTABLE:-}" ] && [ -x "$CLAUDE_GLOBAL_EXE" ]; then
     export CLAUDE_CODE_EXECUTABLE="$CLAUDE_GLOBAL_EXE"
 fi
@@ -178,7 +179,7 @@ case "${1:-}" in
         # claude-agent-sdk binary keeps running (observed surviving a clean stop,
         # ~170MB and a live API session each). Matched by its path INSIDE the
         # gateway's dependency tree, so this can never hit the interactive
-        # `claude` CLI — that one is /usr/lib/node_modules/@anthropic-ai/claude-code.
+        # `claude` CLI — that one is /opt/ua/claude/<version>/lib/node_modules/@anthropic-ai/claude-code.
         pkill -f "talkcode/node_modules/@anthropic-ai/claude-agent-sdk" 2>/dev/null \
             && echo "killed orphan claude-agent-sdk process" || true
         ;;

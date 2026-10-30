@@ -67,24 +67,55 @@ if [ -x /usr/local/bin/talkcode-daemon.sh ]; then
         || echo "[entrypoint] !! agent-anywhere → talkcode 迁移失败" >&2
 fi
 
+# ---- 可选工具：各 coding agent + Go，装在持久卷 /opt/ua（见 /usr/local/bin/ua-tools）----
+# 镜像里只有安装器。每次启动跑一遍 `ua-tools sync`：缺的装上（compose 的 UNIAGENT_TOOLS，没设
+# 就是镜像的默认清单），钉死的版本（talkcode / go / claude）对齐到这个镜像。
+#
+# 放后台：第一次要下 1-2 GB，而 teleport 是主进程、也是人进来的唯一入口，不能等它。平常
+# 什么都不用装，几十毫秒就完；uniagent update 换容器前也会先用新镜像预装一遍。失败只告警：
+# 装失败的工具不切 current，照旧用原来的版本。以 user 跑：装出来的文件得归 user，agy 要自更新。
+UA_ROOT=/opt/ua
+mkdir -p "${UA_ROOT}"
+if [ "$(stat -c %u "${UA_ROOT}")" != "${UID_N}" ]; then
+    echo "[entrypoint] chown ${UA_ROOT} -> ${UID_N}:${GID_N}"
+    chown "${UID_N}:${GID_N}" "${UA_ROOT}"
+fi
+if ! mountpoint -q "${UA_ROOT}"; then
+    echo "[entrypoint] !! ${UA_ROOT} 没挂持久卷：工具会装进容器层，每次重建都要重下（compose 加 ./tools:/opt/ua）" >&2
+fi
+
 # ---- talkcode：IM 网关（Telegram ↔ claude/opencode/…）----
-# 与上面的 sshd 段同样的姿态：只在镜像里装了才动作（旧镜像也能用这份 entrypoint），
 # 失败只警告、不退出 —— teleport 是主进程，不能被网关拖垮。
 #
 # 以 config.yaml 存在为前提：镜像里不含任何配置与 token，没配过的新机器直接跳过，
 # 不会 crash-loop。配置只住在 ~/.config/talkcode/（bind mount）。
+# talkcode 本身也是 ua-tools 装的，所以接在 sync 后面跑；没装就跳过。
 #
 # runuser 而不是直接跑：网关必须是 user（uid 1001），它复用的是 /home/user 下的
 # claude/opencode 登录态。**HOME 必须显式传** —— runuser -u 不模拟登录、不改 HOME，
 # 不传的话脚本会去 /root/.config 找配置，然后判定"缺配置"退出。
-if [ -x /usr/bin/talkcode ] && [ -f "${HOME_DIR}/.config/talkcode/config.yaml" ]; then
-    if /usr/sbin/runuser -u "${USERNAME}" -- env HOME="${HOME_DIR}" \
-        /usr/local/bin/talkcode-daemon.sh start; then
-        :
-    else
-        echo "[entrypoint] !! talkcode 启动失败（teleport 不受影响）" >&2
+start_talkcode() {
+    if [ -x /usr/local/bin/talkcode ] && [ -f "${HOME_DIR}/.config/talkcode/config.yaml" ]; then
+        if /usr/sbin/runuser -u "${USERNAME}" -- env HOME="${HOME_DIR}" \
+            /usr/local/bin/talkcode-daemon.sh start; then
+            :
+        else
+            echo "[entrypoint] !! talkcode 启动失败（teleport 不受影响）" >&2
+        fi
     fi
-fi
+}
+
+(
+    echo "[$(date '+%F %T')] sync (UNIAGENT_TOOLS=${UNIAGENT_TOOLS-<镜像默认>})" >> "${UA_ROOT}/sync.log"
+    if /usr/sbin/runuser -u "${USERNAME}" -- env HOME="${HOME_DIR}" \
+        /usr/local/bin/ua-tools sync >> "${UA_ROOT}/sync.log" 2>&1; then
+        echo "[entrypoint] ua-tools sync 完成"
+    else
+        echo "[entrypoint] !! ua-tools sync 有失败，见 ${UA_ROOT}/sync.log（teleport 不受影响）" >&2
+    fi
+    start_talkcode
+) &
+echo "[entrypoint] ua-tools sync 已在后台开始（日志 ${UA_ROOT}/sync.log，进度 ua-tools list）"
 
 # ---- ttyd：talkcode webui 终端面板的后端 ----
 # 同样的姿态：没装就跳过，失败只警告不退出，不做 crash-loop 重启（容器重启即恢复）。

@@ -4,34 +4,58 @@
 
 ## 预装
 
+镜像里只放基础环境；各 coding agent 和 Go 是**可选工具**，由 `ua-tools` 装进持久卷 `/opt/ua`
+（宿主机 `./tools`），不进镜像。镜像（arm64）压缩后从 ~1.1 GB 降到 ~0.4 GB（按旧镜像各层估算）。
+
+**镜像内置**
+
 | 组件 | 位置 | 说明 |
 |---|---|---|
 | Node.js 24 + npm | `/usr/bin/node` | NodeSource 官方源 |
-| opencode | `opencode` | npm `@opencode/cli`（v2）。v1 的包名是 `opencode-ai`，两者都把 bin 装成 `opencode`，不能同装 |
-| Claude Code | `claude` | npm `@anthropic-ai/claude-code`。**镜像里只有这一份**：talkcode 的 cc harness 经由 Agent SDK 本来还自带一份同样的 ~222 MB 二进制，`agents/talkcode.sh` 装完即删，`talkcode-daemon.sh` 用 `CLAUDE_CODE_EXECUTABLE` 把 SDK 指到这份。所以 cc harness 跑的 CLI 版本 = 这里的版本（构建时取 npm latest） |
-| Codex CLI | `codex` | npm `@openai/codex`，**版本钉死**（`CODEX_VERSION`，当前 0.160.1）—— 见下一行为何不能随便升 |
-| codex-acp | `codex-acp` | npm `@agentclientprotocol/codex-acp`，talkcode `harness: codex` 启动的 ACP 适配器。它把 `@openai/codex` 声明成普通依赖，而 npm 对 0.x 的 caret 锁次版本号（`^0.160.1` = `<0.161.0`），所以顶层 codex 版本一旦对不上，就会在它的 `node_modules` 里再嵌一份 ~284 MB 的 codex。构建层有断言会在漂移时直接失败。连 newapi 网关的配置预置在 `~/.codex/config.toml` |
-| Antigravity CLI | `agy` | 官方安装脚本，装在 `/usr/local/bin`，属主 `user`（便于自更新） |
-| agyacct | `agyacct` | agy 的多 Google 账号切换器（本仓库 `bin/agyacct`）。见「agy 多账号切换」一节 |
-| Go | `/usr/local/go/bin/go` | 官方 tarball（`GO_VERSION` ARG，当前 1.27.0），`go`/`gofmt` 已软链进 `/usr/local/bin` |
 | uv / uvx | `/usr/local/bin/uv` | Astral 官方脚本 |
-| Teleport agent | `teleport` | apt 源 `stable/v18`，**钉 18.10.0**（不能比集群 auth 新），默认不启动 |
-| talkcode | `talkcode` | IM 网关（Telegram ↔ claude/opencode/…）。版本由 Dockerfile 的 `TALKCODE_VERSION` 钉死（当前 0.4.0），装的是 GitHub Release 的 tarball 并校验 SHA256。见「IM 网关」一节 |
-| 其他 | git、python3、build-essential、jq、ripgrep、fd、tmux、htop… | |
+| Teleport agent | `teleport`、`tsh` | apt 源 `stable/v18`，**钉 18.10.0**（不能比集群 auth 新）。只留 teleport 和 tsh，容器里用不上的 tctl / tbot / teleport-update 构建时删掉（省 259 MB） |
+| agyacct | `agyacct` | agy 的多 Google 账号切换器（本仓库 `bin/agyacct`）。见「agy 多账号切换」一节 |
+| ua-tools | `ua-tools` | 可选工具的安装器（本仓库 `bin/ua-tools` + `agents/*.sh`），见下 |
+| 其他 | git、python3、build-essential、jq、ripgrep、fd、tmux、htop、gh、ttyd… | |
 
-> 所有工具都装在 `/usr/local` 或 `/usr` 下，**不在 `$HOME`**，因此不会被 `/home/user` 的
-> bind mount 遮蔽。
+**可选工具（`/opt/ua`）**
+
+| 工具 | 命令 | 版本 | 说明 |
+|---|---|---|---|
+| `opencode` | `opencode` | latest | npm `@opencode/cli`（v2）。v1 的包名是 `opencode-ai`，两者都把 bin 装成 `opencode`，不能同装 |
+| `claude` | `claude` | 钉（CI 构建时的 npm latest） | npm `@anthropic-ai/claude-code`。**只有这一份**：talkcode 的 cc harness 经由 Agent SDK 本来还自带一份同样的 ~222 MB 二进制，`agents/talkcode.sh` 装完即删，`CLAUDE_CODE_EXECUTABLE` 把 SDK 指到这份。所以 cc harness 跑的 CLI 版本 = 这里的版本 |
+| `codex` | `codex`、`codex-acp` | latest | npm `@openai/codex` + `@agentclientprotocol/codex-acp`（talkcode `harness: codex` 的 ACP 适配器）。codex-acp 把 codex 声明成普通依赖、0.x 的 caret 锁次版本号，顶层 codex 对不上就会再嵌一份 ~284 MB 的。所以 codex 的版本由 ua-tools 按 codex-acp 声明的范围算，不再手钉；有断言兜底。连 newapi 网关的配置在 `~/.codex` 不存在时预置 |
+| `agy` | `agy` | 自更新 | 官方安装脚本。agy 在后台自己更新，装在持久卷里以后重建也不丢 |
+| `talkcode` | `talkcode`、`claude-agent-acp` | 钉（`TALKCODE_VERSION`） | IM 网关，GitHub Release 的 tarball 并校验 SHA256。见「IM 网关」一节 |
+| `go` | `go`、`gofmt` | 钉（`GO_VERSION`） | 官方 tarball |
+
+```bash
+ua-tools list                 # 已装版本 / 钉的版本 / 是否在默认清单
+ua-tools install go           # 装（不在默认清单里也行）
+ua-tools update               # latest 类追到最新（opencode、codex，本地构建的 claude）
+ua-tools remove codex         # 删
+```
+
+- **选装**：compose 里设 `UNIAGENT_TOOLS=opencode,agy`，不设就用镜像的默认清单（`latest` 全装，`lite`
+  是 `opencode,agy,go`）。entrypoint 每次启动在**后台**跑 `ua-tools sync`：缺的装上、钉死的版本对齐到
+  这个镜像（换镜像 = 换 talkcode / go / claude 版本，和以前一样），日志在 `/opt/ua/sync.log`。
+  第一次要下 ~1.8 GB，期间 teleport 照常可进，agent 命令要等装完。
+- **布局**：`/opt/ua/<工具>/<版本>/`，装完才把 `current` 切过去，失败就停在原来的版本；保留上一个版本
+  （正在跑的进程可能还在用，回滚也只是把 `current` 指回去）。命令是镜像里 `/usr/local/bin/<命令>` →
+  `/opt/ua/<工具>/current/…` 的固定软链，非登录的 ssh 也找得到；没装的软链悬空，报 command not found。
+- **没挂 `./tools`** 也能用，只是装进容器层、每次重建都要重下，entrypoint 会告警。
 
 **精简版 `ghcr.io/noir017/uniagent:lite`**（2026-10-29 起）：同一个 Dockerfile 用
-`AGENTS=opencode,agy` 构建，不装 Claude Code、Codex、talkcode，其余（Node、Go、uv、Teleport、sshd、
-ttyd、agyacct）都在。给只当 talkcode 远程主机、只跑 oc / agy 的机器用。每次和完整版一起
-构建（`docker.yml` 的 flavor 矩阵），tag 是 `lite` 和 `sha-<短 sha>-lite`。
+`UNIAGENT_TOOLS=opencode,agy,go` 构建，和完整版的差别只剩默认清单。给只当 talkcode 远程主机、只跑
+oc / agy 的机器用。每次和完整版一起构建（`docker.yml` 的 flavor 矩阵），tag 是 `lite` 和
+`sha-<短 sha>-lite`。
 
 ## 目录映射
 
 | 容器内 | 宿主机 |
 |---|---|
 | `/home/user` | `~/apps/uniagent/home` （持久化，登录态/配置/代码都在这里） |
+| `/opt/ua` | `~/apps/uniagent/tools` （可选工具本体，丢了会自动重装，备份可排除） |
 | `/etc/teleport` | `~/apps/uniagent/teleport/config` |
 | `/var/lib/teleport` | `~/apps/uniagent/teleport/data` |
 
@@ -154,7 +178,8 @@ uniagent update              # 拉新镜像、重建、清旧镜像；--dry-run 
 `update` 比手敲两条命令多做的事，都是踩过才加的：镜像引用从 compose 里读（不写死，钉版本时
 跟着变）；比**镜像 ID** 而不是 tag（`latest` 会动，tag 没变不代表镜像没变），没变就一步不走；
 重建前列出容器内除守护会话以外的 tmux 会话并拒绝执行，因为重建会把里面跑着的 coding agent
-一起杀掉；重建后报 talkcode 的**真实**版本（读已装包的 package.json，见下）和守护状态；
+一起杀掉；换容器之前先用新镜像跑一遍 `ua-tools sync`，把新版本的工具预装进 `./tools`（不然新容器
+起来后才现装，期间 agent 用不了；预装失败只告警，失败的工具停在原来的版本）；重建后报 talkcode 的**真实**版本（读已装包的 package.json，见下）和守护状态；
 最后清掉被顶替下来的旧镜像（每次 pull 都会留下一个 ~4.5GB 的 dangling 镜像，docker 不回收）
 ——只按 `org.opencontainers.image.source` 标签清本仓库出的，
 不碰宿主上别的服务；镜像没变时也清一遍兜底，`--dry-run` 不清。要回滚就把 compose 的 `image:`
@@ -176,8 +201,8 @@ IM 网关会由 entrypoint 自动拉起，重建后**不需要任何手工补动
 
 ## IM 网关（talkcode）
 
-Telegram 消息 → talkcode → claude / opencode（ACP），回复流式写回。程序在镜像里，
-配置在挂载里 —— 这条分界是刻意的：镜像可以随便重建，token 与会话历史不跟着走。
+Telegram 消息 → talkcode → claude / opencode（ACP），回复流式写回。程序在 `/opt/ua`
+（版本钉在镜像里），配置在 `~/.config/talkcode` —— 这条分界是刻意的：镜像可以随便重建，token 与会话历史不跟着走。
 
 2.0.0 之前它叫 agent-anywhere（仓库 noir017/agent-anywhere，配置在 `~/.config/agent-anywhere`）。
 talkcode 不读旧名字下的任何东西；改名后第一次起容器时，entrypoint 调
@@ -186,7 +211,7 @@ talkcode 不读旧名字下的任何东西；改名后第一次起容器时，en
 
 | 东西 | 位置 | 进镜像？ |
 |---|---|---|
-| 程序 | `/usr/bin/talkcode`（`/usr/lib/node_modules/talkcode`） | ✅ 版本钉死 |
+| 程序 | `/usr/local/bin/talkcode` → `/opt/ua/talkcode/current` | ❌ 持久卷，版本钉在镜像里 |
 | 守护脚本 | `/usr/local/bin/talkcode-daemon.sh` | ✅ |
 | 配置 | `~/.config/talkcode/config.yaml` | ❌ 挂载 |
 | token | `~/.config/talkcode/.env`（chmod 600） | ❌ 挂载 |
@@ -210,7 +235,7 @@ tmux attach -t talkcode-daemon                  # 贴现场
 `.github/workflows/bump-talkcode.yml`（每天一次，也可在 Actions 页手动 Run workflow）
 会查到它、从 Release 自带的 `SHA256SUMS` 取校验和、改掉 Dockerfile 里
 `TALKCODE_VERSION` 与 `TALKCODE_SHA256` 两个 ARG 并提交，然后复用 docker.yml
-把镜像推到 GHCR。这一层是 Dockerfile 的最后一层，改它不会让前面的 Node / 各 AI CLI 缓存失效。
+把镜像推到 GHCR。镜像里只换了版本钉子，新版本由 `uniagent update` 预装、或容器启动时 `ua-tools sync` 装进持久卷。
 
 **机器侧不自动**：镜像出来之后仍然要自己 `uniagent update`（见「重建」）。重建会杀掉容器里
 正在跑的东西，那个时机不该由定时任务替人决定。
@@ -221,10 +246,10 @@ tmux attach -t talkcode-daemon                  # 贴现场
 
 > `talkcode --version` 在 1.1.0 之前打印的是 cli.ts 里硬编码的 `0.2.0`；1.1.0 起（2026-09-05）
 > 读 package.json，已经可信。验收仍以已装包的 package.json 为准，它不依赖 CLI 能跑起来：
-> `node -p "require('/usr/lib/node_modules/talkcode/package.json').version"`
+> `node -p "require('/opt/ua/talkcode/current/lib/node_modules/talkcode/package.json').version"`
 
 > ⚠️ 别在 `~/.local` 里再装一份：`$HOME/.local/bin` 在 PATH 里排在 `/usr/bin` 前面，
-> 手敲 `talkcode` 会命中它，而守护进程走的是绝对路径 `/usr/bin/talkcode`，
+> 手敲 `talkcode` 会命中它，而守护进程走的是绝对路径 `/usr/local/bin/talkcode`，
 > 两边会静默跑成不同版本。真要临时试私有构建，用
 > `TALKCODE_BIN=~/.local/bin/talkcode bash /usr/local/bin/talkcode-daemon.sh start`。
 

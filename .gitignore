@@ -4,6 +4,7 @@ teleport/data/
 teleport/token
 ssh/keys/
 ssh/keys/*.pub
+tools/
 *.log
 
 # 备份文件

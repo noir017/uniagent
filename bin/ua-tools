@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# ua-tools —— 可选工具（各 coding agent + Go）的安装器。
+#
+# 镜像里只有这个脚本、agents/*.sh 和版本钉子（pins.env），工具本体装在持久卷里：
+#   /opt/ua/<工具>/<版本>/   一个版本一个目录（npm 的 --prefix），装完才写 .ok
+#   /opt/ua/<工具>/current   → 当前版本；装好才切过去（rename 是原子的）
+#   /usr/local/bin/<命令>    → /opt/ua/<工具>/current/…，镜像构建时建好的固定软链（stubs）
+#
+# 命令走 /usr/local/bin 的软链而不是把 /opt/ua 加进 PATH：非登录的 ssh / teleport exec
+# 不读 /etc/profile.d，PATH 是它们自己的默认值，以前工具在 /usr/bin 才处处都找得到。
+# 没装的工具软链悬空，shell 照常报 command not found。
+#
+# 用法：
+#   ua-tools list                 已装版本、钉的版本、是否在默认清单里
+#   ua-tools sync                 缺的装上、钉死的对齐到镜像（entrypoint 每次启动都跑）
+#   ua-tools install <工具>...    同 sync，但只管点名的工具（不在默认清单里也装）
+#   ua-tools update  [工具...]    没钉版本的追到最新（默认：所有已装的）
+#   ua-tools remove  <工具>...    删掉
+#
+# 默认清单是 UNIAGENT_TOOLS（compose 里设），没设就用镜像构建时定的（lite 镜像更少）。
+# sync 管的是「默认清单 ∪ 已装的」：手工 install 的也会跟着镜像对齐版本，但从不自动删。
+#
+# 版本分两种：
+#   钉死（talkcode、go，以及 CI 构建时的 claude）：版本写在镜像里，sync 让它和镜像一致，
+#     换镜像 = 换版本，和以前一样；update 不动它们。
+#   latest（opencode、codex，本地构建的 claude）：装上以后只在 update 时升级。
+#   agy 例外：它会在后台自己更新，update 不管它。
+set -euo pipefail
+
+UA_ROOT="${UA_ROOT:-/opt/ua}"
+UA_LIB="${UA_LIB:-/usr/local/lib/ua-tools}"
+UA_PINS="${UA_PINS:-/usr/local/share/ua-tools/pins.env}"
+# 顺序就是安装顺序：claude 必须在 talkcode 前面（见 agents/talkcode.sh）。
+ALL_TOOLS="opencode claude codex agy talkcode go"
+
+say() { printf 'ua-tools: %s\n' "$*" >&2; }
+die() { say "$*"; exit 1; }
+
+[ -r "${UA_PINS}" ] || die "读不到 ${UA_PINS}"
+# shellcheck source=/dev/null
+. "${UA_PINS}"
+
+# 每个工具在 /usr/local/bin 下放哪些命令，路径相对 /opt/ua/<工具>/current。
+# 装完逐个断言存在：包结构哪天变了，在安装时失败，而不是等到第一次调用。
+#
+# claude-agent-acp 是 talkcode 自带的那份（2026-10-29）：网关搬进自己的容器以后，远程 cc 在
+# 这台主机的 PATH 上找它。链到 talkcode 里的而不是另装一份，是因为 talkcode 的契约测试钉的是
+# 它依赖的那个适配器版本（比如 2.8.0 permissions: ask 的拒绝文案），bump talkcode 时两边一起换。
+bins_of() {
+    case "$1" in
+        opencode) echo "opencode=bin/opencode opencode2=bin/opencode2" ;;
+        claude)   echo "claude=bin/claude" ;;
+        codex)    echo "codex=bin/codex codex-acp=bin/codex-acp" ;;
+        agy)      echo "agy=bin/agy" ;;
+        talkcode) echo "talkcode=bin/talkcode claude-agent-acp=lib/node_modules/talkcode/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js" ;;
+        go)       echo "go=bin/go gofmt=bin/gofmt" ;;
+    esac
+}
+
+pin_of() {
+    case "$1" in
+        claude)   echo "${CLAUDE_CODE_VERSION:-latest}" ;;
+        talkcode) echo "${TALKCODE_VERSION}" ;;
+        go)       echo "${GO_VERSION}" ;;
+        agy)      echo auto ;;
+        *)        echo latest ;;
+    esac
+}
+
+selected() { printf '%s' "${UNIAGENT_TOOLS-${UA_DEFAULT_TOOLS}}" | tr ',' ' '; }
+
+check_names() {
+    local t
+    for t in "$@"; do
+        case " ${ALL_TOOLS} " in
+            *" ${t} "*) ;;
+            *) die "不认识的工具：${t}（可选：${ALL_TOOLS}）" ;;
+        esac
+    done
+}
+
+# 当前版本；没装、或者 current 指着一个没装完的目录，输出空。
+current_of() {
+    local v
+    v="$(readlink "${UA_ROOT}/$1/current" 2>/dev/null)" || return 0
+    if [ -f "${UA_ROOT}/$1/${v}/.ok" ]; then echo "${v}"; fi
+}
+
+# 范围内最高的版本。`npm view --json` 有时输出字符串、有时输出数组（npm 12 对单个版本也给数组）。
+npm_max() {
+    npm view "$1" version --json 2>/dev/null \
+        | jq -r 'if type == "array" then .[] else . end' | sort -V | tail -1
+}
+
+# latest 类工具此刻该装的版本，也就是目录名。
+resolve_latest() {
+    case "$1" in
+        opencode) npm_max "@opencode/cli@latest" ;;
+        claude)   npm_max "@anthropic-ai/claude-code@latest" ;;
+        codex)
+            # codex 的版本不是挑的，是 codex-acp 声明的依赖范围里最高的那个：对不上的话
+            # codex-acp 会在自己的 node_modules 里再嵌一份 codex（见 agents/codex.sh）。
+            # 以前镜像里手钉 CODEX_VERSION，codex-acp 一改范围构建就挂；这里直接按范围算。
+            local acp range codex
+            acp="$(npm_max "@agentclientprotocol/codex-acp@latest")"
+            [ -n "${acp}" ] || return 0
+            # npm 12 对单个版本也可能输出一元素数组，两种都认。
+            range="$(npm view "@agentclientprotocol/codex-acp@${acp}" dependencies --json \
+                | jq -r '(if type == "array" then .[-1] else . end) | .["@openai/codex"] // empty')"
+            [ -n "${range}" ] || return 0
+            codex="$(npm_max "@openai/codex@${range}")"
+            if [ -n "${codex}" ]; then echo "${codex}+acp.${acp}"; fi
+            ;;
+    esac
+}
+
+# 留当前和上一个：正在跑的 node 进程是按需 require 的，删掉它启动时那个版本的目录会让它
+# 半路崩；回滚也只需把 current 指回上一个。
+prune() {
+    local t="$1" cur d kept=0
+    cur="$(readlink "${UA_ROOT}/${t}/current")"
+    # shellcheck disable=SC2045 # 目录名是版本号，没有空格
+    for d in $(ls -1t "${UA_ROOT}/${t}"); do
+        case "${d}" in current|current.new|"${cur}") continue ;; esac
+        if [ "${kept}" -eq 0 ] && [ -f "${UA_ROOT}/${t}/${d}/.ok" ]; then
+            kept=1
+            continue
+        fi
+        rm -rf "${UA_ROOT:?}/${t}/${d}"
+    done
+}
+
+install_version() {
+    local t="$1" v="$2" dir="${UA_ROOT}/$1/$2" b tmp rc=0
+    if [ ! -f "${dir}/.ok" ]; then
+        say "安装 ${t} ${v} → ${dir}"
+        rm -rf "${dir}"
+        mkdir -p "${dir}"
+        tmp="$(mktemp -d)"
+        # 临时的 npm 缓存：不往持久的 ~/.npm 里攒几百 MB 的 tarball。
+        (
+            export PREFIX="${dir}" VERSION="${v}" UA_TMP="${tmp}" npm_config_cache="${tmp}/npm"
+            export UA_SHARE="${UA_PINS%/*}" TALKCODE_SHA256
+            if [ -n "$(current_of claude)" ]; then export WITH_CLAUDE=1; fi
+            # 9>&-：锁不能传给子进程。opencode v2 会留一个常驻后台服务，它要是继承了这个 fd，
+            # 锁就永远放不掉，下一个 ua-tools 会一直等。
+            bash "${UA_LIB}/${t}.sh" 9>&-
+        ) || rc=$?
+        rm -rf "${tmp}"
+        if [ "${rc}" -eq 0 ]; then
+            for b in $(bins_of "${t}"); do
+                [ -x "${dir}/${b#*=}" ] || { say "!! ${t} ${v} 装完却没有 ${b#*=}"; rc=1; }
+            done
+        fi
+        if [ "${rc}" -ne 0 ]; then
+            rm -rf "${dir}"
+            say "!! ${t} ${v} 安装失败，保持原样（当前：$(current_of "${t}" | grep . || echo 未安装)）"
+            return 1
+        fi
+        touch "${dir}/.ok"
+    fi
+    ln -sfn "${v}" "${UA_ROOT}/${t}/current.new"
+    mv -T "${UA_ROOT}/${t}/current.new" "${UA_ROOT}/${t}/current"
+    prune "${t}"
+    say "${t} = ${v}"
+}
+
+# 缺了就装；钉死的对齐到镜像。latest 类已装就不碰（不联网）。
+ensure() {
+    local t="$1" pin cur v
+    pin="$(pin_of "${t}")"
+    cur="$(current_of "${t}")"
+    if [ "${pin}" != latest ]; then
+        [ "${cur}" = "${pin}" ] || install_version "${t}" "${pin}"
+    elif [ -z "${cur}" ]; then
+        v="$(resolve_latest "${t}")"
+        [ -n "${v}" ] || { say "!! 查不到 ${t} 的最新版本（npm registry 不通？）"; return 1; }
+        install_version "${t}" "${v}"
+    fi
+}
+
+upgrade() {
+    local t="$1" pin cur v
+    pin="$(pin_of "${t}")"
+    cur="$(current_of "${t}")"
+    case "${pin}" in
+        auto)   say "${t}：自己会在后台更新，不归这里管"; return 0 ;;
+        latest) ;;
+        *)      say "${t}：钉在镜像里（${pin}），随镜像更新"; return 0 ;;
+    esac
+    v="$(resolve_latest "${t}")"
+    [ -n "${v}" ] || { say "!! 查不到 ${t} 的最新版本（npm registry 不通？）"; return 1; }
+    if [ "${v}" = "${cur}" ]; then
+        say "${t}：已是最新（${v}）"
+    else
+        install_version "${t}" "${v}"
+    fi
+}
+
+# 同一时刻只能有一个在装：容器启动时后台的 sync 可能还没跑完。
+lock() {
+    mkdir -p "${UA_ROOT}"
+    exec 9>"${UA_ROOT}/.lock"
+    if ! flock -n 9; then
+        say "另一个 ua-tools 正在跑（多半是容器启动时的 sync，日志 ${UA_ROOT}/sync.log），等它结束…"
+        flock 9
+    fi
+}
+
+cmd="${1:-list}"
+[ "$#" -eq 0 ] || shift
+
+# stubs 是镜像构建时以 root 跑的；其余以 root 跑会装出 root 的文件，agy 就没法自更新了。
+if [ "$(id -u)" = 0 ] && [ "${cmd}" != stubs ]; then
+    die "别用 root 跑（装出来的文件会归 root）：runuser -u user -- ua-tools ${cmd} $*"
+fi
+
+rc=0
+case "${cmd}" in
+    list)
+        # shellcheck disable=SC2046
+        check_names $(selected)
+        # 表头用 ASCII：printf 按字节算宽度，中文表头对不齐。
+        printf '%-10s %-24s %-14s %s\n' TOOL CURRENT PIN DEFAULT
+        for t in ${ALL_TOOLS}; do
+            case " $(selected) " in *" ${t} "*) mark=✓ ;; *) mark= ;; esac
+            cur="$(current_of "${t}")"
+            printf '%-10s %-24s %-14s %s\n' "${t}" "${cur:--}" "$(pin_of "${t}")" "${mark}"
+        done
+        ;;
+    sync)
+        # shellcheck disable=SC2046
+        check_names $(selected)
+        lock
+        for t in ${ALL_TOOLS}; do
+            case " $(selected) " in
+                *" ${t} "*) ;;
+                *) [ -n "$(current_of "${t}")" ] || continue ;;
+            esac
+            ensure "${t}" || rc=1
+        done
+        ;;
+    install)
+        [ "$#" -gt 0 ] || die "install 要点名：ua-tools install <工具>...（可选：${ALL_TOOLS}）"
+        check_names "$@"
+        lock
+        for t in ${ALL_TOOLS}; do
+            case " $* " in *" ${t} "*) ensure "${t}" || rc=1 ;; esac
+        done
+        ;;
+    update)
+        check_names "$@"
+        lock
+        for t in ${ALL_TOOLS}; do
+            if [ "$#" -gt 0 ]; then
+                case " $* " in *" ${t} "*) ;; *) continue ;; esac
+            elif [ -z "$(current_of "${t}")" ]; then
+                continue
+            fi
+            upgrade "${t}" || rc=1
+        done
+        ;;
+    remove)
+        [ "$#" -gt 0 ] || die "remove 要点名：ua-tools remove <工具>..."
+        check_names "$@"
+        lock
+        for t in "$@"; do
+            rm -rf "${UA_ROOT:?}/${t}"
+            say "已删 ${t}"
+            case " $(selected) " in
+                *" ${t} "*) say "  ${t} 在默认清单里，下次容器启动会装回来；不想要就在 compose 里设 UNIAGENT_TOOLS" ;;
+            esac
+        done
+        ;;
+    stubs)
+        for t in ${ALL_TOOLS}; do
+            for b in $(bins_of "${t}"); do
+                ln -sfn "${UA_ROOT}/${t}/current/${b#*=}" "/usr/local/bin/${b%%=*}"
+            done
+        done
+        ;;
+    -h|--help|help)
+        awk 'NR>1{if($0 !~ /^#/) exit; sub(/^# ?/,""); print}' "$0"
+        ;;
+    *)
+        die "不认识的命令：${cmd}（list / sync / install / update / remove）"
+        ;;
+esac
+exit "${rc}"

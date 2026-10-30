@@ -23,11 +23,17 @@ services:
       # config.yaml 里的 platforms.<id>.terminal.enabled 是两个开关：那个说页面上要不要
       # 有按钮，这个说容器里要不要真的跑起那个 shell 服务。
       # - UNIAGENT_WEB_TERMINAL=1
+      # 这台装哪些工具（逗号分隔，可选 opencode,claude,codex,agy,talkcode,go）。不设就用镜像的
+      # 默认清单：latest 是全部，lite 是 opencode,agy,go。装在下面的 ./tools 里，见 bin/ua-tools。
+      # - UNIAGENT_TOOLS=opencode,claude,codex,agy,talkcode,go
     volumes:
       # user 家目录持久化到宿主机。talkcode 的配置与状态也在这里
       # （home/.config/talkcode/：config.yaml、.env、conversations.json、
       # daemon.log），刻意不进镜像 —— 镜像里只有程序，token 与会话归宿主机。
       - ./home:/home/user
+      # 各 coding agent 和 Go 的本体（ua-tools 装的，全装约 1.8 GB）。不进镜像也不放进 ./home：
+      # 重建镜像不重下，备份时也好整个排除 —— 丢了不要紧，容器启动会重新装回来。
+      - ./tools:/opt/ua
       # teleport agent 配置与状态（joining 后不丢 host UUID）
       - ./teleport/config:/etc/teleport
       - ./teleport/data:/var/lib/teleport
