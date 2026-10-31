@@ -221,8 +221,8 @@ RUN set -eux; \
 # 只有 codex 例外：codex 与 codex-acp 必须同装（见 agents/codex.sh），故合并为一个 token。
 # 版本 ARG 留在 Dockerfile（供 bump-talkcode.yml sed 改写），以环境变量透给脚本。
 ARG AGENTS="opencode,claude,codex,agy,talkcode"
-ARG TALKCODE_VERSION=2.15.1
-ARG TALKCODE_SHA256=fbcb036c7c7537ae18c3983b7485c0977f2854a2d480210ce5a038839367d923
+ARG TALKCODE_VERSION=2.16.0
+ARG TALKCODE_SHA256=3980c82d027dac42bd6734929c69ce4ea94681359ed31bb74192e39e11433d6b
 COPY agents/ /opt/agents/
 COPY codex/config.toml /opt/codex-config/config.toml
 RUN set -eux; \
