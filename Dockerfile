@@ -218,6 +218,13 @@ RUN printf '%s\n' \
 RUN printf '%s\n' 'export LANG="${LANG:-C.UTF-8}" LC_ALL="${LC_ALL:-C.UTF-8}"' \
       > /etc/profile.d/05-locale.sh
 
+# talkcode 的 pod 互通（pod.yaml 里写了 peer:）：网关把其他 pod 的 Host 块和主机公钥写进
+# ~/.talkcode/ssh/，这里让 ssh / scp / rsync / git 都读它，于是 `ssh <主机>.pod` 直接可用。
+# 放系统级而不是改 ~/.ssh/config：那是持久卷里用户自己的文件，网关和镜像都不碰；文件不存在时
+# Include 什么也不做。写在这里而不是 COPY ssh/ 下的文件：ssh/ 是宿主侧目录，docker.yml 不为它重编。
+RUN printf '%s\n' '# talkcode pod-to-pod ssh: see the Dockerfile' 'Include /home/user/.talkcode/ssh/config' \
+      > /etc/ssh/ssh_config.d/20-talkcode-pods.conf
+
 # 守护脚本放最后：改脚本不触发上面的下载层。
 COPY bin/talkcode-daemon.sh /usr/local/bin/talkcode-daemon.sh
 RUN chmod +x /usr/local/bin/talkcode-daemon.sh

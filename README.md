@@ -362,9 +362,18 @@ Teleport 的数据路径要经过 proxy，机器之间频繁新建 ssh 时延迟
 
 - 端口只绑内网地址，并**确认该端口不在云安全组对公网放通的范围里**。云主机的公网 IP 常是到
   内网地址的 1:1 NAT，目的地址区分不了来源，能不能被公网访问完全取决于安全组。
-- 只认公钥、只允许 `user`、`PermitRootLogin no`；所有转发能力关闭（`AllowTcpForwarding` /
-  `AllowAgentForwarding` / `PermitTunnel` / `GatewayPorts` / `X11Forwarding` 全 no），
-  否则这把钥匙等于一条进内网的隧道。
+- 只认公钥、只允许 `user`、`PermitRootLogin no`；`AllowAgentForwarding` / `PermitTunnel` /
+  `GatewayPorts` / `X11Forwarding` 全 no。`AllowTcpForwarding yes`，但只对没带 `restrict` 的钥匙生效——
+  也就是只有 talkcode pod 互通的钥匙（`~/.talkcode/ssh/authorized_keys`，限私网来源）；
+  `~/.ssh/authorized_keys` 里的每一把都带 `restrict`，新加的也要带，否则这把钥匙等于一条进内网的隧道。
+
+### talkcode pod 互通（2026-11-03 起）
+
+pod.yaml（`~/.talkcode/pod.yaml`）里写了 `peer:` 的机器，由 talkcode 网关在 `~/.talkcode/ssh/` 写好
+其他 pod 的钥匙、主机公钥和 `Host <主机>.pod` 配置，于是 `ssh <主机>.pod`（scp、rsync、git、-L/-R）直接可用。
+镜像为此做了两件事：sshd 的 `AuthorizedKeysFile` 加上 `.talkcode/ssh/authorized_keys`（`ssh/sshd_config.d/10-direct.conf`），
+ssh 客户端经 `/etc/ssh/ssh_config.d/20-talkcode-pods.conf` 读那份 config。不碰 `~/.ssh`。
+说明见 talkcode 的 [docs/remote-hosts.md](https://github.com/noir017/talkcode/blob/main/docs/remote-hosts.md#pod-to-pod-ssh-peer)。
 
 ### 坑
 
