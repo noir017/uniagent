@@ -175,8 +175,8 @@ RUN set -eux; \
 # CLAUDE_CODE_VERSION 由 CI 解析成 npm latest 的具体版本传进来，所以「镜像里是构建那天的 claude」
 # 和以前一样；本地构建不传就是 latest（装上以后只在 `ua-tools update` 时升）。
 ARG UNIAGENT_TOOLS="opencode,claude,codex,agy,talkcode,go"
-ARG TALKCODE_VERSION=2.50.0
-ARG TALKCODE_SHA256=cc75392bf70974e5481ea00b82facfae214b9aea11a65299a2b8e349f9a9f0b3
+ARG TALKCODE_VERSION=2.51.0
+ARG TALKCODE_SHA256=8d3c30bf486862f27b68791471ed65d0a021a88c83bda34b46db76cc528fef40
 ARG GO_VERSION=1.27.0
 ARG CLAUDE_CODE_VERSION=latest
 COPY agents/ /usr/local/lib/ua-tools/
