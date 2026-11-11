@@ -7,7 +7,7 @@
 #   docker pull ghcr.io/noir017/uniagent:sha-<短 sha>  # 钉死某次提交
 #   docker pull ghcr.io/noir017/uniagent:lite          # 精简版：默认只装 opencode + agy + go（2026-10-29）
 #
-# 精简版（lite）是同一个 Dockerfile 换 UNIAGENT_TOOLS 构建的：给只当 talkcode 远程主机、不需要
+# 精简版（lite）是同一个 Dockerfile 换 UNIAGENT_TOOLS 构建的：给只当 fleetherd 远程主机、不需要
 # claude / codex 的机器用。各 agent 和 Go 不在镜像里，由 ua-tools 装进持久卷
 # （见 bin/ua-tools），所以两版的差别只剩「compose 没设 UNIAGENT_TOOLS 时默认装哪些」，镜像内容
 # 除最后几层外完全相同。每次和完整版一起构建；tag 是 lite 和 sha-<短 sha>-lite。
@@ -41,9 +41,9 @@ on:
       - 'docker-compose.yml'
       - 'ssh/**'
       - 'teleport/**'
-      - '.github/workflows/bump-talkcode.yml'
+      - '.github/workflows/bump-fleetherd.yml'
   workflow_dispatch:
-  # 供 bump-talkcode.yml 用 `jobs.<id>.uses` 复用。
+  # 供 bump-fleetherd.yml 用 `jobs.<id>.uses` 复用。
   #
   # 为什么不让 bump 那边推 main、靠上面的 push 触发：**用 GITHUB_TOKEN 推出去的
   # commit 不会再触发任何 workflow**（GitHub 为防死循环的明文限制）。bump 推完就
@@ -59,7 +59,7 @@ on:
 
 concurrency:
   # 字面量 docker- 而不是 ${{ github.workflow }}：被 workflow_call 复用时
-  # github.workflow 是**调用方**的名字（Bump talkcode），分组就和 push 触发
+  # github.workflow 是**调用方**的名字（Bump fleetherd），分组就和 push 触发
   # 的那次不一样，两条路会并发去抢同一个 latest tag。钉死字面量让它们共用一个组。
   group: docker-${{ github.ref }}
   cancel-in-progress: true
@@ -101,8 +101,8 @@ jobs:
         # cache 是 GHA 缓存的 scope：完整版沿用原来的 amd64 / arm64，加精简版时不让它的缓存
         # 白白作废；精简版另起 lite-<arch>，两者 UNIAGENT_TOOLS 不同，后几层本来就对不上。
         include:
-          - { flavor: full, tools: 'opencode,claude,codex,agy,talkcode,go', cache: amd64, platform: linux/amd64, arch: amd64, runner: ubuntu-24.04 }
-          - { flavor: full, tools: 'opencode,claude,codex,agy,talkcode,go', cache: arm64, platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
+          - { flavor: full, tools: 'opencode,claude,codex,agy,fleetherd,go', cache: amd64, platform: linux/amd64, arch: amd64, runner: ubuntu-24.04 }
+          - { flavor: full, tools: 'opencode,claude,codex,agy,fleetherd,go', cache: arm64, platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
           - { flavor: lite, tools: 'opencode,agy,go', cache: lite-amd64, platform: linux/amd64, arch: amd64, runner: ubuntu-24.04 }
           - { flavor: lite, tools: 'opencode,agy,go', cache: lite-arm64, platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
     steps:

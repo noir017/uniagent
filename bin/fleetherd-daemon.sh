@@ -1,47 +1,67 @@
 #!/usr/bin/env bash
-# talkcode keep-alive daemon (container edition).
+# fleetherd keep-alive daemon (container edition).
 #
 # This host is a Docker container whose PID 1 is Teleport, so there is no
 # systemd and no per-user service manager. This script is the stand-in: it
-# runs the talkcode daemon in a dedicated tmux session and restarts it
+# runs the fleetherd daemon in a dedicated tmux session and restarts it
 # if it dies, with backoff so a hard-failing daemon cannot hammer the
 # Telegram API.
 #
-# Start:   bash /usr/local/bin/talkcode-daemon.sh start
-# Stop:    bash /usr/local/bin/talkcode-daemon.sh stop
-# Status:  bash /usr/local/bin/talkcode-daemon.sh status
-# Logs:    tail -f ~/.config/talkcode/daemon.log
+# Start:   bash /usr/local/bin/fleetherd-daemon.sh start
+# Stop:    bash /usr/local/bin/fleetherd-daemon.sh stop
+# Status:  bash /usr/local/bin/fleetherd-daemon.sh status
+# Logs:    tail -f ~/.config/fleetherd/daemon.log
 #
 # You normally do not run `start` by hand: entrypoint.sh calls it on container
-# startup whenever ~/.config/talkcode/config.yaml exists, so a rebuild
+# startup whenever ~/.config/fleetherd/config.yaml exists, so a rebuild
 # comes back up on its own. Use `stop`/`start` here for a manual restart after
 # editing the config.
 
 set -uo pipefail
 
-DAEMON_SESSION="talkcode-daemon"
-APP_DIR="$HOME/.config/talkcode"
+DAEMON_SESSION="fleetherd-daemon"
+
+# Config dir. 3.0.0 renamed it from ~/.config/talkcode. The old directory keeps
+# working until it is migrated by hand; a bare rename is not enough because
+# config.yaml can hold absolute paths into it (the web terminal's socket, for
+# one). It is never moved from here: in the container this path is a bind mount,
+# so moving it would leave the mount empty.
+# Order: the new dir if it exists, else the old one if that exists (noted once
+# per start), else the new one. entrypoint.sh asks for the same answer through
+# the `config-dir` subcommand instead of duplicating this.
+_config_dir() {
+    local new="$HOME/.config/fleetherd" old="$HOME/.config/talkcode"
+    if [ -d "$new" ]; then
+        printf '%s\n' "$new"
+    elif [ -d "$old" ]; then
+        printf '%s\n' "$old"
+    else
+        printf '%s\n' "$new"
+    fi
+}
+APP_DIR="$(_config_dir)"
 LOG="$APP_DIR/daemon.log"
 
-# The image's fixed link into the persistent tool volume (/opt/ua/talkcode/current,
+# The image's fixed link into the persistent tool volume (/opt/ua/fleetherd/current,
 # installed by ua-tools). Overridable so a private build can be tried without
-# touching that:  TALKCODE_BIN=~/.local/bin/talkcode ...
+# touching that:  FLEETHERD_BIN=~/.local/bin/fleetherd ...
+# TALKCODE_BIN is still read when FLEETHERD_BIN is unset (3.0.0 compat).
 # Note that $HOME/.local/bin comes FIRST in PATH, so a leftover install there
 # would win for anything resolving by name — this script deliberately does not,
 # which is why the override has to be explicit.
-BIN="${TALKCODE_BIN:-/usr/local/bin/talkcode}"
+BIN="${FLEETHERD_BIN:-${TALKCODE_BIN:-/usr/local/bin/fleetherd}}"
 
 # Absolute path to this script: _supervise re-invokes it inside tmux, where the
 # caller's cwd no longer applies.
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
-# Match the supervised process by its FULL path. A bare "talkcode start"
+# Match the supervised process by its FULL path. A bare "fleetherd start"
 # pattern also matches the ssh/bash command line that invokes this script, so
 # pgrep/pkill would find itself and (worse) kill the calling shell.
 PATTERN="$BIN start"
 
 # The claude harness runs the Claude Code CLI through the Agent SDK, and the SDK
-# ships its own ~222 MB copy of that CLI as optional deps. agents/talkcode.sh
+# ships its own ~222 MB copy of that CLI as optional deps. agents/fleetherd.sh
 # deletes them when claude is installed (it is the same binary — verified with
 # cmp at 2.1.280), so the SDK has to be told where the one that is left lives;
 # without this every cc turn fails with "Claude native binary not found".
@@ -55,13 +75,13 @@ fi
 MIN_BACKOFF=5
 MAX_BACKOFF=300
 
-# One-time move from the project's old name (agent-anywhere, renamed to talkcode
-# in 2.0.0, 2026-10-10). talkcode deliberately reads nothing under the old
-# names, so the state this deployment has built up — config.yaml, .env,
-# conversations, web UI topics, scheduled tasks — has to be carried across once,
-# before the daemon first looks for it. entrypoint.sh calls this ahead of its
-# "is there a config?" check, as the user: run as root, the sed below would
-# leave a root-owned 0600 config.yaml the daemon cannot read.
+# One-time move from the project's oldest name (agent-anywhere, renamed to
+# talkcode in 2.0.0 and to fleetherd in 3.0.0). fleetherd deliberately reads
+# nothing under agent-anywhere, so the state this deployment has built up —
+# config.yaml, .env, conversations, web UI topics, scheduled tasks — has to be
+# carried across once, before the daemon first looks for it. entrypoint.sh calls
+# this ahead of its "is there a config?" check, as the user: run as root, the
+# sed below would leave a root-owned 0600 config.yaml the daemon cannot read.
 #
 # COPY, not move: the old directory stays exactly as it was, so pinning the
 # previous image (which knows only the old path) still finds everything. It
@@ -76,7 +96,7 @@ _migrate_from_agent_anywhere() {
         rm -rf "$new.migrating"
         if ! cp -a "$old" "$new.migrating"; then
             rm -rf "$new.migrating"
-            echo "migrate: could not copy $old to $new — talkcode will not find its config" >&2
+            echo "migrate: could not copy $old to $new — fleetherd will not find its config" >&2
             return 1
         fi
         # Sockets are recreated by whoever listens on them; the old reverse-CLI
@@ -86,13 +106,16 @@ _migrate_from_agent_anywhere() {
         # Absolute paths into the config dir (the web terminal's socket is the
         # one in use). Only the path form: a workdir under some
         # ~/workspace/agent-anywhere checkout must keep pointing there.
-        sed -i 's#/\.config/agent-anywhere/#/.config/talkcode/#g' "$new.migrating/config.yaml"
+        sed -i "s#/\.config/agent-anywhere/#/.config/$(basename "$new")/#g" "$new.migrating/config.yaml"
         mv "$new.migrating" "$new"
         echo "migrate: copied $old to $new (the old directory is left in place)"
     fi
-    if [ -d "$HOME/.agent-anywhere" ] && [ ! -e "$HOME/.talkcode" ]; then
-        cp -a "$HOME/.agent-anywhere" "$HOME/.talkcode" \
-            && echo "migrate: copied ~/.agent-anywhere to ~/.talkcode"
+    # The per-host dir moved to ~/.fleetherd in 3.0.0. Only seed it when neither
+    # new name exists: an existing ~/.talkcode is moved by the gateway on its
+    # next connect, and stale agent-anywhere state must not shadow it.
+    if [ -d "$HOME/.agent-anywhere" ] && [ ! -e "$HOME/.fleetherd" ] && [ ! -e "$HOME/.talkcode" ]; then
+        cp -a "$HOME/.agent-anywhere" "$HOME/.fleetherd" \
+            && echo "migrate: copied ~/.agent-anywhere to ~/.fleetherd"
     fi
     # The skill links the old daemon made point into the old install path,
     # which no longer exists in this image. Only a DANGLING link is removed:
@@ -108,14 +131,17 @@ _migrate_from_agent_anywhere() {
 
 _supervise() {
     mkdir -p "$APP_DIR"
+    if [ "$APP_DIR" != "$HOME/.config/fleetherd" ]; then
+        echo "[$(date -Is)] using the old config dir $APP_DIR (do not just rename it: config.yaml may hold absolute paths into it)" >> "$LOG"
+    fi
     local backoff=$MIN_BACKOFF
     while true; do
-        echo "[$(date -Is)] starting talkcode" >> "$LOG"
+        echo "[$(date -Is)] starting fleetherd" >> "$LOG"
         local start_ts=$SECONDS
         "$BIN" start >> "$LOG" 2>&1
         local rc=$?
         local ran=$(( SECONDS - start_ts ))
-        echo "[$(date -Is)] talkcode exited rc=$rc after ${ran}s" >> "$LOG"
+        echo "[$(date -Is)] fleetherd exited rc=$rc after ${ran}s" >> "$LOG"
 
         # A run that lasted a while is a healthy process that happened to die —
         # reset the backoff. A run that died immediately is a config or auth
@@ -149,7 +175,7 @@ case "${1:-}" in
         # every message and each sees a random half. The tmux-session check above
         # covers the daemon started this way; this catches one started by hand.
         if pgrep -f "$PATTERN" >/dev/null 2>&1; then
-            echo "error: a talkcode daemon is already polling this token" >&2
+            echo "error: a fleetherd daemon is already polling this token" >&2
             echo "       stop it first:  $SELF stop" >&2
             exit 1
         fi
@@ -180,7 +206,9 @@ case "${1:-}" in
         # ~170MB and a live API session each). Matched by its path INSIDE the
         # gateway's dependency tree, so this can never hit the interactive
         # `claude` CLI — that one is /opt/ua/claude/<version>/lib/node_modules/@anthropic-ai/claude-code.
-        pkill -f "talkcode/node_modules/@anthropic-ai/claude-agent-sdk" 2>/dev/null \
+        # Both names are matched: /opt/ua/talkcode may still be around from before
+        # the 3.0.0 rename, and its processes are just as orphaned.
+        pkill -f '(fleetherd|talkcode)/node_modules/@anthropic-ai/claude-agent-sdk' 2>/dev/null \
             && echo "killed orphan claude-agent-sdk process" || true
         ;;
     status)
@@ -191,6 +219,10 @@ case "${1:-}" in
         fi
         pgrep -f "$PATTERN" >/dev/null && echo "daemon process: UP" || echo "daemon process: DOWN"
         echo "binary: $BIN"
+        echo "config: $APP_DIR"
+        ;;
+    config-dir)
+        printf '%s\n' "$APP_DIR"
         ;;
     _supervise)
         _supervise
@@ -199,7 +231,7 @@ case "${1:-}" in
         _migrate_from_agent_anywhere
         ;;
     *)
-        echo "usage: $0 {start|stop|status|migrate-from-agent-anywhere}" >&2
+        echo "usage: $0 {start|stop|status|config-dir|migrate-from-agent-anywhere}" >&2
         exit 2
         ;;
 esac

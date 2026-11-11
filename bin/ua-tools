@@ -21,7 +21,7 @@
 # sync 管的是「默认清单 ∪ 已装的」：手工 install 的也会跟着镜像对齐版本，但从不自动删。
 #
 # 版本分两种：
-#   钉死（talkcode、go，以及 CI 构建时的 claude）：版本写在镜像里，sync 让它和镜像一致，
+#   钉死（fleetherd、go，以及 CI 构建时的 claude）：版本写在镜像里，sync 让它和镜像一致，
 #     换镜像 = 换版本，和以前一样；update 不动它们。
 #   latest（opencode、codex，本地构建的 claude）：装上以后只在 update 时升级。
 #   agy 例外：它会在后台自己更新，update 不管它。
@@ -30,8 +30,8 @@ set -euo pipefail
 UA_ROOT="${UA_ROOT:-/opt/ua}"
 UA_LIB="${UA_LIB:-/usr/local/lib/ua-tools}"
 UA_PINS="${UA_PINS:-/usr/local/share/ua-tools/pins.env}"
-# 顺序就是安装顺序：claude 必须在 talkcode 前面（见 agents/talkcode.sh）。
-ALL_TOOLS="opencode claude codex agy talkcode go"
+# 顺序就是安装顺序：claude 必须在 fleetherd 前面（见 agents/fleetherd.sh）。
+ALL_TOOLS="opencode claude codex agy fleetherd go"
 
 say() { printf 'ua-tools: %s\n' "$*" >&2; }
 die() { say "$*"; exit 1; }
@@ -43,16 +43,19 @@ die() { say "$*"; exit 1; }
 # 每个工具在 /usr/local/bin 下放哪些命令，路径相对 /opt/ua/<工具>/current。
 # 装完逐个断言存在：包结构哪天变了，在安装时失败，而不是等到第一次调用。
 #
-# claude-agent-acp 是 talkcode 自带的那份（2026-10-29）：网关搬进自己的容器以后，远程 cc 在
-# 这台主机的 PATH 上找它。链到 talkcode 里的而不是另装一份，是因为 talkcode 的契约测试钉的是
-# 它依赖的那个适配器版本（比如 2.8.0 permissions: ask 的拒绝文案），bump talkcode 时两边一起换。
+# claude-agent-acp 是 fleetherd 自带的那份（2026-10-29）：网关搬进自己的容器以后，远程 cc 在
+# 这台主机的 PATH 上找它。链到 fleetherd 里的而不是另装一份，是因为 fleetherd 的契约测试钉的是
+# 它依赖的那个适配器版本（比如 2.8.0 permissions: ask 的拒绝文案），bump fleetherd 时两边一起换。
+#
+# talkcode 是 3.0.0 留下的命令别名：包同时提供两个 bin，两个都要在 /usr/local/bin 下有固定软链，
+# 否则老脚本按名字调用会找不到。它和 fleetherd 指向同一个安装。
 bins_of() {
     case "$1" in
         opencode) echo "opencode=bin/opencode opencode2=bin/opencode2" ;;
         claude)   echo "claude=bin/claude" ;;
         codex)    echo "codex=bin/codex codex-acp=bin/codex-acp" ;;
         agy)      echo "agy=bin/agy" ;;
-        talkcode) echo "talkcode=bin/talkcode claude-agent-acp=lib/node_modules/talkcode/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js" ;;
+        fleetherd) echo "fleetherd=bin/fleetherd talkcode=bin/talkcode claude-agent-acp=lib/node_modules/fleetherd/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js" ;;
         go)       echo "go=bin/go gofmt=bin/gofmt" ;;
     esac
 }
@@ -60,14 +63,26 @@ bins_of() {
 pin_of() {
     case "$1" in
         claude)   echo "${CLAUDE_CODE_VERSION:-latest}" ;;
-        talkcode) echo "${TALKCODE_VERSION}" ;;
+        fleetherd) echo "${FLEETHERD_VERSION}" ;;
         go)       echo "${GO_VERSION}" ;;
         agy)      echo auto ;;
         *)        echo latest ;;
     esac
 }
 
-selected() { printf '%s' "${UNIAGENT_TOOLS-${UA_DEFAULT_TOOLS}}" | tr ',' ' '; }
+# 3.0.0 把工具名 talkcode 改成了 fleetherd。老名字仍然收：compose 里的
+# UNIAGENT_TOOLS、脚本里的 `ua-tools install talkcode` 都不必改。
+canon_name() {
+    case "$1" in
+        talkcode) printf '%s\n' fleetherd ;;
+        *)        printf '%s\n' "$1" ;;
+    esac
+}
+
+selected() {
+    printf '%s' "${UNIAGENT_TOOLS-${UA_DEFAULT_TOOLS}}" | tr ',' ' ' \
+        | awk '{ for (i = 1; i <= NF; i++) if ($i == "talkcode") $i = "fleetherd"; print }'
+}
 
 check_names() {
     local t
@@ -140,7 +155,7 @@ install_version() {
         # 临时的 npm 缓存：不往持久的 ~/.npm 里攒几百 MB 的 tarball。
         (
             export PREFIX="${dir}" VERSION="${v}" UA_TMP="${tmp}" npm_config_cache="${tmp}/npm"
-            export UA_SHARE="${UA_PINS%/*}" TALKCODE_SHA256
+            export UA_SHARE="${UA_PINS%/*}" FLEETHERD_SHA256
             if [ -n "$(current_of claude)" ]; then export WITH_CLAUDE=1; fi
             # 9>&-：锁不能传给子进程。opencode v2 会留一个常驻后台服务，它要是继承了这个 fd，
             # 锁就永远放不掉，下一个 ua-tools 会一直等。
@@ -209,6 +224,17 @@ lock() {
 
 cmd="${1:-list}"
 [ "$#" -eq 0 ] || shift
+
+# 工具名参数里的老名字 talkcode 一律按 fleetherd 处理（3.0.0 兼容）。
+if [ "$#" -gt 0 ]; then
+    _args=()
+    for _t in "$@"; do
+        _c="$(canon_name "${_t}")"
+        [ "${_c}" = "${_t}" ] || say "${_t} 已改名为 fleetherd，按 fleetherd 处理"
+        _args+=("${_c}")
+    done
+    set -- "${_args[@]}"
+fi
 
 # stubs 是镜像构建时以 root 跑的；其余以 root 跑会装出 root 的文件，agy 就没法自更新了。
 if [ "$(id -u)" = 0 ] && [ "${cmd}" != stubs ]; then
