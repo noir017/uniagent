@@ -6,7 +6,7 @@
   the MCP registration passes in.
 #>
 param(
-  [string]$Query  = 'talkcode 发布流程',
+  [string]$Query  = 'fleetherd 发布流程',
   [Parameter(Mandatory = $true)][string]$ApiUrl,
   [string]$Bank   = 'agent'
 )

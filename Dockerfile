@@ -120,10 +120,10 @@ RUN set -eux; \
 COPY entrypoint.sh /usr/local/sbin/entrypoint.sh
 RUN chmod +x /usr/local/sbin/entrypoint.sh
 
-# ---------- 9b. ttyd：talkcode webui 终端面板的后端 ----------
+# ---------- 9b. ttyd：fleetherd webui 终端面板的后端 ----------
 #
-# 网页里那个终端不是 talkcode 自己实现的 —— 它只做一层过 session cookie 的反向代理，
-# 真正的 PTY 在这里。这么分是为了让 talkcode 一个原生依赖都不用加：自己实现要引
+# 网页里那个终端不是 fleetherd 自己实现的 —— 它只做一层过 session cookie 的反向代理，
+# 真正的 PTY 在这里。这么分是为了让 fleetherd 一个原生依赖都不用加：自己实现要引
 # node-pty（**它的 tarball 里只有 darwin 和 win32 的 prebuild，Linux 一个都没有**，等于
 # 所有 Linux 安装都要现场编译）、xterm.js、WebSocket 服务端，外加 scrollback / resize /
 # 重连 / 手机软键盘。ttyd 是 1.3MB 静态二进制，这些连同 CJK 与 IME 支持全都现成。
@@ -164,19 +164,19 @@ RUN set -eux; \
     gh --version
 
 # ---------- 11. 可选工具（装在持久卷 /opt/ua，不进镜像）----------
-# opencode / claude / codex / agy / talkcode / Go 压缩后合计 ~650 MB、解压后 ~2 GB，曾占镜像的
+# opencode / claude / codex / agy / fleetherd / Go 压缩后合计 ~650 MB、解压后 ~2 GB，曾占镜像的
 # 一大半。现在镜像里只有安装器（bin/ua-tools + agents/*.sh）和版本钉子（pins.env），本体由
 # ua-tools 装进 /opt/ua（compose 挂宿主机 ./tools）：换镜像不用重下，各机器用 compose 的
 # UNIAGENT_TOOLS 选装。entrypoint 每次启动在后台跑 `ua-tools sync`，补齐缺的、把钉死的版本
 # 对齐到这个镜像；uniagent update 换容器之前也先用新镜像预装一遍。细节见 bin/ua-tools 开头。
 #
 # UNIAGENT_TOOLS 这个 ARG 是 compose 没设时的默认清单（CI 的 lite 传 opencode,agy,go）。
-# 版本 ARG 留在 Dockerfile（bump-talkcode.yml 用 sed 改写 TALKCODE_*），写进 pins.env 给 ua-tools。
+# 版本 ARG 留在 Dockerfile（bump-fleetherd.yml 用 sed 改写 FLEETHERD_*），写进 pins.env 给 ua-tools。
 # CLAUDE_CODE_VERSION 由 CI 解析成 npm latest 的具体版本传进来，所以「镜像里是构建那天的 claude」
 # 和以前一样；本地构建不传就是 latest（装上以后只在 `ua-tools update` 时升）。
-ARG UNIAGENT_TOOLS="opencode,claude,codex,agy,talkcode,go"
-ARG TALKCODE_VERSION=2.59.0
-ARG TALKCODE_SHA256=0169896ddde06ef0b173743e00f25e5499fc0ca2a2e23ecd0a09d9437748cab9
+ARG UNIAGENT_TOOLS="opencode,claude,codex,agy,fleetherd,go"
+ARG FLEETHERD_VERSION=2.59.0
+ARG FLEETHERD_SHA256=0169896ddde06ef0b173743e00f25e5499fc0ca2a2e23ecd0a09d9437748cab9
 ARG GO_VERSION=1.27.0
 ARG CLAUDE_CODE_VERSION=latest
 COPY agents/ /usr/local/lib/ua-tools/
@@ -191,17 +191,17 @@ RUN set -eux; \
     for f in /usr/local/lib/ua-tools/*.sh; do bash -n "$f"; done; \
     printf '%s\n' \
       "UA_DEFAULT_TOOLS=${UNIAGENT_TOOLS}" \
-      "TALKCODE_VERSION=${TALKCODE_VERSION}" \
-      "TALKCODE_SHA256=${TALKCODE_SHA256}" \
+      "FLEETHERD_VERSION=${FLEETHERD_VERSION}" \
+      "FLEETHERD_SHA256=${FLEETHERD_SHA256}" \
       "GO_VERSION=${GO_VERSION}" \
       "CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}" \
       > /usr/local/share/ua-tools/pins.env; \
     install -d -o ${USERNAME} -g ${USERNAME} /opt/ua; \
     ua-tools stubs; \
     runuser -u ${USERNAME} -- ua-tools list
-# talkcode 的 cc harness 要靠 CLAUDE_CODE_EXECUTABLE 找 claude（SDK 自带的那份在 agents/talkcode.sh
-# 里删了）。也写进登录环境（2026-10-29）：talkcode 搬进自己的容器以后，cc 是网关经 ssh 远程起的，
-# 环境取的是这里的**登录环境**（talkcode-remote 跑 `bash -i -l -c`），不经过 talkcode-daemon.sh，
+# fleetherd 的 cc harness 要靠 CLAUDE_CODE_EXECUTABLE 找 claude（SDK 自带的那份在 agents/fleetherd.sh
+# 里删了）。也写进登录环境（2026-10-29）：fleetherd 搬进自己的容器以后，cc 是网关经 ssh 远程起的，
+# 环境取的是这里的**登录环境**（fleetherd-remote 跑 `bash -i -l -c`），不经过 fleetherd-daemon.sh，
 # 也看不到 Dockerfile 的 ENV。不写的话远程 cc 第一句话就报 "Claude native binary not found"。
 # 只在 claude 真装了时才设：指向一个不存在的路径，会把清楚的报错变成看不懂的 ENOENT。
 RUN printf '%s\n' \
@@ -211,23 +211,28 @@ RUN printf '%s\n' \
       > /etc/profile.d/20-claude-code.sh
 
 # ssh 登录会话的语言环境（2026-10-29）。上面 ENV 里的 LC_ALL 只有容器 PID 1 的子孙看得到；
-# talkcode 搬进自己的容器以后，这里的 agent 是网关经 ssh 远程起的，环境取的是登录环境
-# （talkcode-remote 跑 `bash -i -l -c`），实测里面没有 LC_ALL。缺了它 agent 跑的命令遇到
+# fleetherd 搬进自己的容器以后，这里的 agent 是网关经 ssh 远程起的，环境取的是登录环境
+# （fleetherd-remote 跑 `bash -i -l -c`），实测里面没有 LC_ALL。缺了它 agent 跑的命令遇到
 # 中文按 POSIX 处理。只在未设时补，人经 Teleport 登录带进来的值照旧。单独一层、放这里：
 # 写进第 8 段会让后面所有下载层的缓存一起作废。
 RUN printf '%s\n' 'export LANG="${LANG:-C.UTF-8}" LC_ALL="${LC_ALL:-C.UTF-8}"' \
       > /etc/profile.d/05-locale.sh
 
-# talkcode 的 pod 互通（pod.yaml 里写了 peer:）：网关把其他 pod 的 Host 块和主机公钥写进
-# ~/.talkcode/ssh/，这里让 ssh / scp / rsync / git 都读它，于是 `ssh <主机>.pod` 直接可用。
+# fleetherd 的 pod 互通（pod.yaml 里写了 peer:）：网关把其他 pod 的 Host 块和主机公钥写进
+# ~/.fleetherd/ssh/，这里让 ssh / scp / rsync / git 都读它，于是 `ssh <主机>.pod` 直接可用。
 # 放系统级而不是改 ~/.ssh/config：那是持久卷里用户自己的文件，网关和镜像都不碰；文件不存在时
 # Include 什么也不做。写在这里而不是 COPY ssh/ 下的文件：ssh/ 是宿主侧目录，docker.yml 不为它重编。
-RUN printf '%s\n' '# talkcode pod-to-pod ssh: see the Dockerfile' 'Include /home/user/.talkcode/ssh/config' \
-      > /etc/ssh/ssh_config.d/20-talkcode-pods.conf
+#
+# 两个路径都列上：3.0.0 首次连上一台主机时会把 ~/.talkcode 移成 ~/.fleetherd，并留一个
+# ~/.talkcode -> .fleetherd 的软链。迁移前后两边的 config 都能读到，先匹配到的那份生效。
+RUN printf '%s\n' \
+      '# fleetherd pod-to-pod ssh: see the Dockerfile' \
+      'Include /home/user/.fleetherd/ssh/config /home/user/.talkcode/ssh/config' \
+      > /etc/ssh/ssh_config.d/20-fleetherd-pods.conf
 
 # 守护脚本放最后：改脚本不触发上面的下载层。
-COPY bin/talkcode-daemon.sh /usr/local/bin/talkcode-daemon.sh
-RUN chmod +x /usr/local/bin/talkcode-daemon.sh
+COPY bin/fleetherd-daemon.sh /usr/local/bin/fleetherd-daemon.sh
+RUN chmod +x /usr/local/bin/fleetherd-daemon.sh
 
 # recall MCP 服务（见 mcp/README.md）。放进镜像而不是 /home/user，是因为它是代码不是配置：
 # 镜像更新就一起更新，不会在某台机器上悄悄留个旧版本。指向它的注册项仍在 /home/user 下

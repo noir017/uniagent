@@ -16,19 +16,19 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - USERNAME=user
-      # talkcode webui 的终端面板后端（ttyd）。默认不起。
+      # fleetherd webui 的终端面板后端（ttyd）。默认不起。
       #
       # 打开它等于把容器里的一个 shell 挂在 webui 的登录 token 后面 —— 权限上限没变
       # （智能体本来就是全工具权限），但从 token 泄漏到任意命令的距离短得多。所以它和
       # config.yaml 里的 platforms.<id>.terminal.enabled 是两个开关：那个说页面上要不要
       # 有按钮，这个说容器里要不要真的跑起那个 shell 服务。
       # - UNIAGENT_WEB_TERMINAL=1
-      # 这台装哪些工具（逗号分隔，可选 opencode,claude,codex,agy,talkcode,go）。不设就用镜像的
+      # 这台装哪些工具（逗号分隔，可选 opencode,claude,codex,agy,fleetherd,go）。不设就用镜像的
       # 默认清单：latest 是全部，lite 是 opencode,agy,go。装在下面的 ./tools 里，见 bin/ua-tools。
-      # - UNIAGENT_TOOLS=opencode,claude,codex,agy,talkcode,go
+      # - UNIAGENT_TOOLS=opencode,claude,codex,agy,fleetherd,go
     volumes:
-      # user 家目录持久化到宿主机。talkcode 的配置与状态也在这里
-      # （home/.config/talkcode/：config.yaml、.env、conversations.json、
+      # user 家目录持久化到宿主机。fleetherd 的配置与状态也在这里
+      # （home/.config/fleetherd/：config.yaml、.env、conversations.json、
       # daemon.log），刻意不进镜像 —— 镜像里只有程序，token 与会话归宿主机。
       - ./home:/home/user
       # 各 coding agent 和 Go 的本体（ua-tools 装的，全装约 1.8 GB）。不进镜像也不放进 ./home：
