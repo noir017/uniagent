@@ -22,8 +22,10 @@ set -uo pipefail
 DAEMON_SESSION="fleetherd-daemon"
 
 # Config dir. 3.0.0 renamed it from ~/.config/talkcode. The old directory keeps
-# working until it is renamed by hand, and it is never moved from here: in the
-# container this path is a bind mount, so moving it would leave the mount empty.
+# working until it is migrated by hand; a bare rename is not enough because
+# config.yaml can hold absolute paths into it (the web terminal's socket, for
+# one). It is never moved from here: in the container this path is a bind mount,
+# so moving it would leave the mount empty.
 # Order: the new dir if it exists, else the old one if that exists (noted once
 # per start), else the new one. entrypoint.sh asks for the same answer through
 # the `config-dir` subcommand instead of duplicating this.
@@ -130,7 +132,7 @@ _migrate_from_agent_anywhere() {
 _supervise() {
     mkdir -p "$APP_DIR"
     if [ "$APP_DIR" != "$HOME/.config/fleetherd" ]; then
-        echo "[$(date -Is)] using the old config dir $APP_DIR (rename it to ~/.config/fleetherd when convenient)" >> "$LOG"
+        echo "[$(date -Is)] using the old config dir $APP_DIR (do not just rename it: config.yaml may hold absolute paths into it)" >> "$LOG"
     fi
     local backoff=$MIN_BACKOFF
     while true; do
