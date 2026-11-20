@@ -52,10 +52,11 @@ RUN set -eux; \
     npm install -g npm@latest; \
     node -v; npm -v
 
-# ---------- 3. Teleport agent ----------
-# 包里 5 个二进制 704 MB，这里只留 teleport（agent，PID 1）和 tsh（容器里连别的节点要用），
-# 连同 tsh 要的 fdpass-teleport。删掉的三个容器里用不上：tctl 是管 auth 的，tbot 该跑在宿主机
-# 上（机器身份不进容器），teleport-update 要 systemd。省 259 MB。
+# ---------- 3. Teleport 客户端 ----------
+# 包里 5 个二进制 704 MB，这里只留 tsh（容器里连别的节点要用，连同它要的 fdpass-teleport）和
+# teleport。容器本身是 agentless 节点（见第 9 段），teleport 默认不跑，留着是为了能回滚到 agent
+# 模式（compose 的 command 改回 teleport start）。删掉的三个容器里用不上：tctl 是管 auth 的，
+# tbot 该跑在宿主机上（机器身份不进容器），teleport-update 要 systemd。省 259 MB。
 # 同一个 RUN 里删，才真的不进镜像。
 RUN set -eux; \
     curl -fsSL https://apt.releases.teleport.dev/gpg \
@@ -101,10 +102,10 @@ RUN set -eux; \
     mkdir -p /opt/home-skel; \
     cp -a /home/${USERNAME}/. /opt/home-skel/
 
-# ---------- 9. sshd（只给机器直连用，人类仍走 Teleport）----------
-# 背景：Teleport 的数据路径要经过 proxy，机器之间频繁新建 ssh 时延迟和丢包会被放大。
-# 所以给机器开一条直连：sshd 只绑宿主机的内网地址，公网碰不到；人类访问不变，
-# 仍走 Teleport（有角色门禁+录制）。
+# ---------- 9. sshd（容器唯一的 ssh 入口，也是默认主进程）----------
+# 两类访问都进它：Teleport 以 agentless 方式接入（proxy 直接拨这个 sshd，sshd 信任集群的
+# OpenSSH CA，见 sshd_config.d/20-teleport.conf），网关和机器用钥匙直连（10-direct.conf）。
+# 端口只发布到宿主机的内网地址，公网碰不到。
 #
 # 刻意放在最后一层：加在第 1 段的 apt 里会让后面 7 层（Node/Python/各 AI CLI）
 # 全部失效，重建要几十分钟；放这里只重建这一层。
@@ -258,4 +259,6 @@ RUN chmod +x /usr/local/bin/agyacct; \
 
 WORKDIR /home/user
 ENTRYPOINT ["/usr/bin/tini","--","/usr/local/sbin/entrypoint.sh"]
-CMD ["sleep","infinity"]
+# sshd 做主进程：它退出容器就跟着退出、按 restart 策略重启，不会出现容器活着却没人能进来。
+# -e 把日志打到 stderr（docker logs）。
+CMD ["/usr/sbin/sshd","-D","-e"]

@@ -13,7 +13,7 @@
 |---|---|---|
 | Node.js 24 + npm | `/usr/bin/node` | NodeSource 官方源 |
 | uv / uvx | `/usr/local/bin/uv` | Astral 官方脚本 |
-| Teleport agent | `teleport`、`tsh` | apt 源 `stable/v18`，**钉 18.10.0**（不能比集群 auth 新）。只留 teleport 和 tsh，容器里用不上的 tctl / tbot / teleport-update 构建时删掉（省 259 MB） |
+| Teleport | `tsh`、`teleport` | apt 源 `stable/v18`，**钉 18.10.0**（不能比集群 auth 新）。tsh 连别的节点用；容器本身是 agentless 节点，teleport 默认不跑，留着回滚到 agent 模式。tctl / tbot / teleport-update 构建时删掉（省 259 MB） |
 | agyacct | `agyacct` | agy 的多 Google 账号切换器（本仓库 `bin/agyacct`）。见「agy 多账号切换」一节 |
 | ua-tools | `ua-tools` | 可选工具的安装器（本仓库 `bin/ua-tools` + `agents/*.sh`），见下 |
 | 其他 | git、python3、build-essential、jq、ripgrep、fd、tmux、htop、gh、ttyd… | |
@@ -39,7 +39,7 @@ ua-tools remove codex         # 删
 - **选装**：compose 里设 `UNIAGENT_TOOLS=opencode,agy`，不设就用镜像的默认清单（`latest` 全装，`lite`
   是 `opencode,agy,go`）。entrypoint 每次启动在**后台**跑 `ua-tools sync`：缺的装上、钉死的版本对齐到
   这个镜像（换镜像 = 换 fleetherd / go / claude 版本，和以前一样），日志在 `/opt/ua/sync.log`。
-  第一次要下 ~1.8 GB，期间 teleport 照常可进，agent 命令要等装完。
+  第一次要下 ~1.8 GB，期间 ssh（含 Teleport）照常可进，agent 命令要等装完。
 - **布局**：`/opt/ua/<工具>/<版本>/`，装完才把 `current` 切过去，失败就停在原来的版本；保留上一个版本
   （正在跑的进程可能还在用，回滚也只是把 `current` 指回去）。命令是镜像里 `/usr/local/bin/<命令>` →
   `/opt/ua/<工具>/current/…` 的固定软链，非登录的 ssh 也找得到；没装的软链悬空，报 command not found。
@@ -56,8 +56,9 @@ oc / agy 的机器用。每次和完整版一起构建（`docker.yml` 的 flavor
 |---|---|
 | `/home/user` | `~/apps/uniagent/home` （持久化，登录态/配置/代码都在这里） |
 | `/opt/ua` | `~/apps/uniagent/tools` （可选工具本体，丢了会自动重装，备份可排除） |
-| `/etc/teleport` | `~/apps/uniagent/teleport/config` |
-| `/var/lib/teleport` | `~/apps/uniagent/teleport/data` |
+| `/etc/ssh/keys` | `~/apps/uniagent/ssh/keys` （sshd 主机密钥，Teleport 的 CA 和主机证书） |
+| `/etc/teleport` | `~/apps/uniagent/teleport/config` （agent 模式的配置，回滚用） |
+| `/var/lib/teleport` | `~/apps/uniagent/teleport/data` （agent 的 host UUID，回滚用） |
 
 容器内用户 `user` 的 uid:gid = **1001:1001**，与宿主机 `ubuntu` 一致，挂载目录读写不串权限。
 `user` 可免密 sudo。
@@ -130,12 +131,62 @@ profile 存在 `~/.config/agy-accounts/`（持久卷，重建镜像不丢）。�
 agy 自更新后二进制指纹变了会自动重新探测。这一步需要能访问 `oauth2.googleapis.com`；
 不通时 profile 照样能存能切，只是显示 `<未知>`，之后补跑 `agyacct refresh <名字>` 即可。
 
-## Teleport agent（默认不启动）
+## Teleport（agentless）
 
-镜像里只装了二进制，**没有** 任何 join 配置。需要接入时在容器内执行：
+容器里不跑 teleport：它在集群里登记成 agentless（OpenSSH）节点，proxy 直接拨容器的 sshd。
+sshd 信任集群的 OpenSSH CA（认用户证书），并出示一张 Teleport 签的主机证书。
+不靠反向隧道，所以集群里**每台** proxy 都能直连它（反向隧道只挂在 agent 拨过去的那台 proxy 上，
+没有 proxy peering 时别的 proxy 连不到）。
 
-token 在集群上签（`tctl tokens add --type=node --ttl=1h`），
-ca-pin 可以从公开的 CA 导出接口自己算（等价于 `tctl status` 里那行）：
+前提：sshd 的发布地址要从每台 proxy 的网络命名空间都连得上，在 proxy 那台机器上看 banner：
+
+```bash
+docker run --rm --network container:<proxy 容器> alpine sh -c "timeout 8 nc <内网地址> <端口> </dev/null | head -1"
+```
+
+在集群上（能跑 `tctl` 的地方）登记节点、导出 CA、签主机证书：
+
+```bash
+UUID=$(cat /proc/sys/kernel/random/uuid)
+cat > node.yaml <<EOT
+kind: node
+version: v2
+sub_kind: openssh
+metadata:
+  name: $UUID
+  labels: {env: dev}
+spec:
+  addr: <内网地址>:<端口>
+  hostname: <节点名>
+EOT
+tctl create -f node.yaml
+tctl auth export --type=openssh | sed 's/^cert-authority //' > teleport_openssh_ca.pub
+# principals：地址、节点名、UUID。以后可能改名就把新名字也签进去，改名时不用重签
+tctl auth sign --host=<内网地址>,<节点名>,$UUID --format=openssh --out=teleport_host_key
+```
+
+三个文件放进宿主机的 `ssh/keys/`（`teleport_host_key` 属主 root、600），compose 打开
+`20-teleport.conf` 那行挂载，`docker compose up -d`。不想重建容器：把 `20-teleport.conf` 拷进容器的
+`/etc/ssh/sshd_config.d/`，`sshd -t` 通过后给 sshd 发 SIGHUP（已建立的连接不断）。
+
+验证：`tsh ssh user@<节点名>`；`tsh ls` 的 Address 列是 `<内网地址>:<端口>`，不再是 `⟵ Tunnel`。
+`tctl nodes ls` 里 Version 列为空是正常的（没有 agent）。
+
+- **原主机密钥要排在 Teleport 的前面**（10-direct.conf 先于 20-teleport.conf 加载，已满足）。两把都是
+  ed25519，sshd 给不要证书的客户端出示第一把，钉原密钥的客户端看到的指纹不变。
+- **钉了原主机密钥的 OpenSSH 客户端**要么排除证书算法（`HostKeyAlgorithms -*-cert-v01@openssh.com`，
+  fleetherd 网关和 pod 互通已经这样做），要么在 known_hosts 加 Teleport 主机 CA 的 `@cert-authority` 行。
+  否则客户端先要证书，拿到的是 Teleport 那把密钥，没有 CA 可验就拿它去比 known_hosts，报 host key changed。
+- 改节点名：`tctl get node/<uuid>` 改 `spec.hostname`，再 `tctl create -f`（新名字要已签在证书里）。
+
+### 回滚到 agent 模式
+
+镜像里仍留着 teleport。compose 加回 `command: ["teleport","start","-c","/etc/teleport/teleport.yaml"]`、
+`docker compose up -d`，再 `tctl rm node/<uuid>` 删掉 agentless 那条记录。`teleport/config`、`teleport/data`
+别删：host UUID 在里面，回滚不用重新 join。这时 entrypoint 会在后台另起 sshd，钥匙直连不受影响。
+
+新机器第一次以 agent 模式接入：token 在集群上签（`tctl tokens add --type=node --ttl=1h`），ca-pin 可以从
+公开的 CA 导出接口自己算（等价于 `tctl status` 里那行）：
 
 ```bash
 curl -s "https://<proxy>/webapi/auth/export?type=tls-host" \
@@ -143,7 +194,7 @@ curl -s "https://<proxy>/webapi/auth/export?type=tls-host" \
   | openssl dgst -sha256 -hex | awk '{print "sha256:"$NF}'
 ```
 
-拿到 token 后在容器里：
+然后在容器里：
 
 ```bash
 ./ua
@@ -157,15 +208,8 @@ sudo teleport node configure --silent \
 ```
 
 `--output` 是 `file://` + **绝对**路径，且**不覆盖已存在文件**（重生成先 `mv` 走）；
-`--node-name`（不是 `--nodename`）**必须全小写**，
-大写会让原生 `ssh` + ProxyCommand 报 `offline or does not exist`。
-
-让它常驻：把 compose 的 `command` 改成
-`["teleport","start","-c","/etc/teleport/teleport.yaml"]`（`./ua` 走 docker exec，不受影响）；
-临时试跑用 `docker compose exec -d uniagent teleport start -c /etc/teleport/teleport.yaml`。
-
-配置与 host UUID 分别落在 `teleport/config`、`teleport/data`，容器重建不会重复注册。
-agent 版本需 ≤ 集群 auth 版本；集群是 v18 时保持 `TELEPORT_CHANNEL=stable/v18` 即可。
+`--node-name`（不是 `--nodename`）**必须全小写**，大写会让原生 `ssh` + ProxyCommand 报
+`offline or does not exist`。agent 版本需 ≤ 集群 auth 版本；集群是 v18 时保持 `TELEPORT_CHANNEL=stable/v18`。
 
 ## 重建
 
@@ -222,7 +266,7 @@ agent-anywhere 的配置仍会在第一次起容器时被**复制**到当前配�
 | 会话绑定 | `~/.config/fleetherd/conversations.json` | ❌ 挂载 |
 | 日志 | `~/.config/fleetherd/daemon.log` | ❌ 挂载 |
 
-容器 PID 1 是 teleport，没有 systemd，所以守护由 `fleetherd-daemon.sh` 顶上：跑在
+容器里没有 systemd（PID 1 是 tini，主进程是 sshd），所以守护由 `fleetherd-daemon.sh` 顶上：跑在
 独立 tmux 会话里，挂了自动重启，5s→300s 指数退避（跑满 60s 才算健康并重置退避，免得
 配置错误时空转刷 Telegram API）。entrypoint 在 `config.yaml` 存在时自动 `start`，
 所以**没配过的机器不会 crash-loop**。
@@ -345,25 +389,25 @@ environment:
 - **升级 ttyd 要同时改 Dockerfile 里 `TTYD_VERSION` 和两个 `TTYD_SHA256_*`**，否则构建当场
   失败 —— 这是故意的，好过悄悄装上一个没人核对过的二进制。
 
-## 直连 sshd：给机器用的旁路
+## sshd：容器唯一的 ssh 入口
 
-Teleport 的数据路径要经过 proxy，机器之间频繁新建 ssh 时延迟和丢包会被放大。所以容器里另开一个
-只给机器用的 sshd，人类访问仍走 Teleport。
+Teleport（agentless，见上）和钥匙直连（fleetherd 网关、pod 互通、别的机器）都进这一个 sshd。
+钥匙直连不经 proxy，机器之间频繁新建 ssh 时不受跨洋延迟和丢包拖累。
 
 - `Dockerfile` 第 9 段装 `openssh-server`。**刻意放在最后一层** —— 加进第 1 段的 apt
   会让后面几层（Node / Python / 各 AI CLI）全部缓存失效，重建要几十分钟。
-- `ssh/sshd_config.d/10-direct.conf` → 挂到 `/etc/ssh/sshd_config.d/`。
+- 镜像默认 CMD 是 `sshd -D -e`：sshd 是主进程，挂了容器跟着按 restart 策略重启，日志在 `docker logs`。
+  compose 把 command 换成别的（比如回滚到 agent 模式）时，entrypoint 在后台另起 sshd，失败只警告。
+- `ssh/sshd_config.d/10-direct.conf` → 挂到 `/etc/ssh/sshd_config.d/`，接 Teleport 时再挂 `20-teleport.conf`。
   属主必须 root（sshd 拒绝加载属主不对的 include）。
 - `ssh/keys/` → 挂到 `/etc/ssh/keys`，**可写**。主机密钥在这里持久化，首次启动由
-  entrypoint 生成，重建镜像不换指纹。
-- `entrypoint.sh` 在 `exec "$@"` 之前后台启动 sshd，**任何一步失败都只警告不退出**。
-  代价：sshd 意外退出不会自动拉起，容器重启即恢复。
+  entrypoint 生成，重建镜像不换指纹；Teleport 的 CA、主机密钥和证书也放这里。
 - 默认不发布端口。要用时在 compose 里加 `ports: ["<内网地址>:22022:22"]`，
   公钥放进 `home/.ssh/authorized_keys`（1001:1001，600）。
 
 ### 安全边界
 
-这条路**没有** Teleport 的角色门禁、会话录制、证书过期。补偿手段：
+钥匙直连**没有** Teleport 的角色门禁、会话录制、证书过期。补偿手段：
 
 - 端口只绑内网地址，并**确认该端口不在云安全组对公网放通的范围里**。云主机的公网 IP 常是到
   内网地址的 1:1 NAT，目的地址区分不了来源，能不能被公网访问完全取决于安全组。

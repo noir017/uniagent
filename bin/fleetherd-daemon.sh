@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fleetherd keep-alive daemon (container edition).
 #
-# This host is a Docker container whose PID 1 is Teleport, so there is no
+# This host is a Docker container whose main process is sshd, so there is no
 # systemd and no per-user service manager. This script is the stand-in: it
 # runs the fleetherd daemon in a dedicated tmux session and restarts it
 # if it dies, with backoff so a hard-failing daemon cannot hammer the

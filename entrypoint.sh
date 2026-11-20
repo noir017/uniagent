@@ -29,12 +29,14 @@ if [ -d /opt/home-skel ]; then
     shopt -u dotglob nullglob
 fi
 
-# teleport 状态目录（若已挂载）也归 root 使用，这里只保证存在
+# teleport agent 的状态目录：只有 command 改回 `teleport start`（回滚到 agent 模式）才用得上
 mkdir -p /var/lib/teleport
 
-# ---- sshd：给机器直连用的旁路（人类仍走 Teleport）----
-# 只在镜像里装了 openssh-server 时才动作，所以旧镜像也能用这份 entrypoint。
-# 任何一步失败都只警告、不退出 —— teleport 是主进程，不能被 sshd 拖垮。
+# ---- sshd：容器唯一的 ssh 入口（Teleport agentless 节点 + 网关 / 机器直连）----
+# 默认 CMD 就是 `sshd -D -e`：sshd 是主进程，挂了容器跟着重启。这里只备好运行目录和主机密钥。
+# command 被换成别的（比如回滚时的 teleport start）时照旧在后台另起一个 sshd，失败只警告。
+SSHD_MAIN=0
+case "${1:-}" in /usr/sbin/sshd) SSHD_MAIN=1 ;; esac
 if [ -x /usr/sbin/sshd ]; then
     mkdir -p /run/sshd /etc/ssh/keys
     chmod 755 /run/sshd
@@ -46,13 +48,14 @@ if [ -x /usr/sbin/sshd ]; then
             -f /etc/ssh/keys/ssh_host_ed25519_key || true
     fi
     chmod 600 /etc/ssh/keys/ssh_host_ed25519_key 2>/dev/null || true
-    if /usr/sbin/sshd -t 2>&1; then
-        # 后台化：tini 是 PID 1，会负责收养和回收；teleport 仍是 exec 的主进程。
-        # 代价是 sshd 意外退出不会被自动拉起 —— 容器重启即恢复。
-        /usr/sbin/sshd
-        echo "[entrypoint] sshd 已启动 (pid $(cat /run/sshd.pid 2>/dev/null || echo '?'))"
-    else
-        echo "[entrypoint] !! sshd 配置校验失败，跳过 sshd（teleport 不受影响）" >&2
+    if [ "${SSHD_MAIN}" = 0 ]; then
+        if /usr/sbin/sshd -t 2>&1; then
+            # tini 是 PID 1，会负责收养和回收。sshd 意外退出不会被自动拉起 —— 容器重启即恢复。
+            /usr/sbin/sshd
+            echo "[entrypoint] sshd 已在后台启动 (pid $(cat /run/sshd.pid 2>/dev/null || echo '?'))"
+        else
+            echo "[entrypoint] !! sshd 配置校验失败，跳过 sshd（主进程不受影响）" >&2
+        fi
     fi
 fi
 
@@ -81,7 +84,7 @@ fi
 # 镜像里只有安装器。每次启动跑一遍 `ua-tools sync`：缺的装上（compose 的 UNIAGENT_TOOLS，没设
 # 就是镜像的默认清单），钉死的版本（fleetherd / go / claude）对齐到这个镜像。
 #
-# 放后台：第一次要下 1-2 GB，而 teleport 是主进程、也是人进来的唯一入口，不能等它。平常
+# 放后台：第一次要下 1-2 GB，而 sshd 是主进程、也是人和网关进来的入口，不能等它。平常
 # 什么都不用装，几十毫秒就完；uniagent update 换容器前也会先用新镜像预装一遍。失败只告警：
 # 装失败的工具不切 current，照旧用原来的版本。以 user 跑：装出来的文件得归 user，agy 要自更新。
 UA_ROOT=/opt/ua
@@ -95,7 +98,7 @@ if ! mountpoint -q "${UA_ROOT}"; then
 fi
 
 # ---- fleetherd：IM 网关（Telegram ↔ claude/opencode/…）----
-# 失败只警告、不退出 —— teleport 是主进程，不能被网关拖垮。
+# 失败只警告、不退出 —— 主进程（sshd）不能被网关拖垮。
 #
 # 以 config.yaml 存在为前提：镜像里不含任何配置与 token，没配过的新机器直接跳过，
 # 不会 crash-loop。配置只住在配置目录（bind mount；新名 ~/.config/fleetherd，旧的
@@ -111,7 +114,7 @@ start_fleetherd() {
             /usr/local/bin/fleetherd-daemon.sh start; then
             :
         else
-            echo "[entrypoint] !! fleetherd 启动失败（teleport 不受影响）" >&2
+            echo "[entrypoint] !! fleetherd 启动失败（主进程不受影响）" >&2
         fi
     fi
 }
@@ -122,7 +125,7 @@ start_fleetherd() {
         /usr/local/bin/ua-tools sync >> "${UA_ROOT}/sync.log" 2>&1; then
         echo "[entrypoint] ua-tools sync 完成"
     else
-        echo "[entrypoint] !! ua-tools sync 有失败，见 ${UA_ROOT}/sync.log（teleport 不受影响）" >&2
+        echo "[entrypoint] !! ua-tools sync 有失败，见 ${UA_ROOT}/sync.log（主进程不受影响）" >&2
     fi
     start_fleetherd
 ) &

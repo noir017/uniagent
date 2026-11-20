@@ -10,8 +10,8 @@ services:
     hostname: uniagent
     restart: always
     init: false
-    # 直连 sshd 默认不发布端口，要用见 README「直连 sshd」。
-    # 接入 Teleport 后让它常驻（见 README「Teleport agent」）：
+    # 主进程是镜像默认的 sshd（Teleport agentless 节点 + 网关 / 机器直连共用）。默认不发布端口，
+    # 要用见 README「sshd」「Teleport（agentless）」。回滚到 agent 模式才需要改 command：
     # command: ["teleport","start","-c","/etc/teleport/teleport.yaml"]
     environment:
       - TZ=Asia/Shanghai
@@ -34,14 +34,17 @@ services:
       # 各 coding agent 和 Go 的本体（ua-tools 装的，全装约 1.8 GB）。不进镜像也不放进 ./home：
       # 重建镜像不重下，备份时也好整个排除 —— 丢了不要紧，容器启动会重新装回来。
       - ./tools:/opt/ua
-      # teleport agent 配置与状态（joining 后不丢 host UUID）
+      # teleport agent 的配置与状态，只有回滚到 agent 模式才读（data 里有 host UUID，留着回滚不用重新 join）
       - ./teleport/config:/etc/teleport
       - ./teleport/data:/var/lib/teleport
       # 一次性 join token（1h TTL，join 成功后不再读）；放在备份目录内
       - ./teleport/token:/root/join.token
       # sshd 的加固配置（属主必须 root，否则 sshd 拒绝加载 include）
       - ./ssh/sshd_config.d/10-direct.conf:/etc/ssh/sshd_config.d/10-direct.conf:ro
-      # sshd 主机密钥：可写，首次启动由 entrypoint 生成；持久化=重建镜像不换指纹
+      # 接入 Teleport（agentless）后打开，见 README「Teleport（agentless）」
+      # - ./ssh/sshd_config.d/20-teleport.conf:/etc/ssh/sshd_config.d/20-teleport.conf:ro
+      # sshd 主机密钥（以及 Teleport 的 CA、主机密钥和证书）：可写，首次启动由 entrypoint 生成
+      # 原主机密钥；持久化=重建镜像不换指纹
       - ./ssh/keys:/etc/ssh/keys
     working_dir: /home/user
     # 交互式工具（opencode / claude / codex / agy 的 TUI）需要 tty

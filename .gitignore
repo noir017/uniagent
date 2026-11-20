@@ -9,3 +9,6 @@ tools/
 
 # 备份文件
 *.bak*
+
+# 临时 git worktree
+.worktrees/

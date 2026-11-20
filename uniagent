@@ -172,7 +172,7 @@ do_update() {
         [ -d "$d" ] || d=/home/user/.config/talkcode
         [ -f "$d/config.yaml" ]' 2>/dev/null; then
         printf '%s\n' "uniagent: 内置网关没开（网关在 fleetherd 容器里，它会自己重连过来：fleetherd status）" >&2
-        printf '%s\n' "uniagent: 完成。teleport agent 重新注册约 15s，其间 ssh uniagent 会挂住" >&2
+        printf '%s\n' "uniagent: 完成。" >&2
         return 0
     fi
 
@@ -197,9 +197,7 @@ do_update() {
     done
     printf '%s\n' "${st:-（拿不到 daemon 状态）}" | sed 's/^/    /' >&2
 
-    # teleport agent 重新注册要十几秒，这段时间 `ssh uniagent` 会静默挂住
-    # （不报"节点不存在"，就是不出声），别误判成网络故障。
-    printf '%s\n' "uniagent: 完成。teleport agent 重新注册约 15s，其间 ssh uniagent 会挂住" >&2
+    printf '%s\n' "uniagent: 完成。" >&2
 }
 
 if [ "${1:-}" = update ]; then
@@ -237,7 +235,7 @@ if [ "${state}" != "running" ]; then
     printf '%s\n' "uniagent: 容器当前 ${state}，正在启动…" >&2
     (cd "${APP_DIR}" && docker compose up -d) >&2 \
         || die "启动失败，看 cd ${APP_DIR} && docker compose logs"
-    # teleport 是主进程，起来要几秒；等到 running 再 exec，否则 exec 会报 not running
+    # 容器起来要一会儿；等到 running 再 exec，否则 exec 会报 not running
     for _ in $(seq 1 30); do
         [ "$(docker inspect -f '{{.State.Status}}' "${CONTAINER}")" = running ] && break
         sleep 0.5
