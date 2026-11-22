@@ -176,8 +176,8 @@ RUN set -eux; \
 # CLAUDE_CODE_VERSION 由 CI 解析成 npm latest 的具体版本传进来，所以「镜像里是构建那天的 claude」
 # 和以前一样；本地构建不传就是 latest（装上以后只在 `ua-tools update` 时升）。
 ARG UNIAGENT_TOOLS="opencode,claude,codex,agy,fleetherd,go"
-ARG FLEETHERD_VERSION=3.30.0
-ARG FLEETHERD_SHA256=b356356dfdda7cb3c4ee9e1edf6ec4e94b5f8cd8bfd738b92029f14dcb4fde88
+ARG FLEETHERD_VERSION=3.32.1
+ARG FLEETHERD_SHA256=2e6f8299b2db18553172ee62049cef64eae49bfeee7d6840c1ad43fb5339b627
 ARG GO_VERSION=1.27.0
 ARG CLAUDE_CODE_VERSION=latest
 COPY agents/ /usr/local/lib/ua-tools/
