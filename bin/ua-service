@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# ua-service —— 容器里常驻服务的保活器（没有 systemd，主进程是 sshd）。
+#
+# 一个服务一个定义文件：/usr/local/lib/ua-service/<名字>.sh（UA_SERVICE_LIB 可改），
+# 被本脚本 source，定义这几个变量：
+#   SVC_CMD=(…)         要跑的命令（数组），前台运行、不自己 daemonize
+#   SVC_REQUIRE=(…)     可选：这些文件都在才启动（配置、二进制）；缺了 start 报错、start-all 跳过
+#   SVC_ENV_FILE=…      可选：启动前 `set -a; . 文件` 读进环境（机密放这里，不上命令行）
+#   SVC_WORKDIR=…       可选：工作目录，默认 $HOME
+#
+# 用法（以 user 跑）：
+#   ua-service start <名字>      起保活循环；已在跑就什么也不做
+#   ua-service stop <名字>       先 SIGTERM 让服务优雅退出（最多等 20 秒），再收掉保活循环
+#   ua-service restart <名字>    stop + start；换了二进制（ua-tools update）或改了配置后用
+#   ua-service status [名字]     不给名字就列全部
+#   ua-service logs <名字> [-f]  看日志（~/.local/state/ua-service/<名字>/log）
+#   ua-service start-all         启动所有前置条件齐全的服务（entrypoint 在 ua-tools sync 之后调）
+#
+# 保活：服务退出就重启。跑满 60 秒算正常，下次 5 秒后重启；否则退避翻倍，封顶 300 秒，
+# 免得一个起不来的服务疯狂重启。日志超过 20 MB 就复制成 log.1 再清空（copytruncate：
+# 服务一直开着这个文件，不能 mv）。
+#
+# 进程用 setsid 脱离调用方的会话：从 ssh / docker exec 里 start，断开以后照样在。
+set -uo pipefail
+
+LIB="${UA_SERVICE_LIB:-/usr/local/lib/ua-service}"
+STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ua-service"
+SELF="$(readlink -f "$0")"
+MIN_BACKOFF=5
+MAX_BACKOFF=300
+LOG_MAX_BYTES=$((20 * 1024 * 1024))
+STOP_GRACE=20
+
+say() { printf 'ua-service: %s\n' "$*" >&2; }
+die() { say "$*"; exit 1; }
+
+# 读服务定义，设好 NAME / DIR / LOG。
+load() {
+    NAME="${1:-}"
+    [ -n "${NAME}" ] || die "要给服务名（可选：$(names | tr '\n' ' ')）"
+    case "${NAME}" in */*|.*) die "服务名不合法：${NAME}" ;; esac
+    local def="${LIB}/${NAME}.sh"
+    [ -r "${def}" ] || die "没有这个服务：${NAME}（定义文件 ${def}）"
+    SVC_CMD=() SVC_REQUIRE=() SVC_ENV_FILE="" SVC_WORKDIR="${HOME}"
+    # shellcheck source=/dev/null
+    . "${def}"
+    [ "${#SVC_CMD[@]}" -gt 0 ] || die "${def} 没定义 SVC_CMD"
+    DIR="${STATE_ROOT}/${NAME}"
+    LOG="${DIR}/log"
+}
+
+names() {
+    local f
+    for f in "${LIB}"/*.sh; do
+        [ -e "${f}" ] && basename "${f}" .sh
+    done
+}
+
+missing_requirements() {
+    local f
+    for f in "${SVC_REQUIRE[@]}"; do
+        [ -e "${f}" ] || printf '%s\n' "${f}"
+    done
+}
+
+pid_alive() {
+    local p
+    p="$(cat "$1" 2>/dev/null)" || return 1
+    [ -n "${p}" ] && kill -0 "${p}" 2>/dev/null
+}
+
+stamp() { date '+%F %T'; }
+
+rotate() {
+    local size
+    size="$(stat -c %s "${LOG}" 2>/dev/null || echo 0)"
+    if [ "${size}" -gt "${LOG_MAX_BYTES}" ]; then
+        cp -f "${LOG}" "${LOG}.1" && : > "${LOG}"
+    fi
+}
+
+supervise() {
+    echo $$ > "${DIR}/supervisor.pid"
+    local child="" backoff=${MIN_BACKOFF} start_ts ran rc
+    # 收到 TERM（stop）：先让服务自己收尾，超时再强杀，然后整个循环退出。
+    on_term() {
+        if [ -n "${child}" ] && kill -0 "${child}" 2>/dev/null; then
+            kill -TERM "${child}" 2>/dev/null
+            local i
+            for ((i = 0; i < STOP_GRACE * 2; i++)); do
+                kill -0 "${child}" 2>/dev/null || break
+                sleep 0.5
+            done
+            kill -KILL "${child}" 2>/dev/null
+        fi
+        echo "[$(stamp)] stopped" >> "${LOG}"
+        rm -f "${DIR}/supervisor.pid" "${DIR}/child.pid"
+        exit 0
+    }
+    trap on_term TERM INT HUP
+    cd "${SVC_WORKDIR}" 2>/dev/null || cd "${HOME}" || exit 1
+    while true; do
+        rotate
+        echo "[$(stamp)] starting: ${SVC_CMD[*]}" >> "${LOG}"
+        start_ts=${SECONDS}
+        (
+            if [ -n "${SVC_ENV_FILE}" ] && [ -r "${SVC_ENV_FILE}" ]; then
+                set -a
+                # shellcheck source=/dev/null
+                . "${SVC_ENV_FILE}"
+                set +a
+            fi
+            exec "${SVC_CMD[@]}"
+        ) >> "${LOG}" 2>&1 < /dev/null &
+        child=$!
+        echo "${child}" > "${DIR}/child.pid"
+        # 轮询而不是直接 wait：顺带按大小轮转日志；wait 会被 trap 打断，轮询不会漏掉 TERM。
+        while kill -0 "${child}" 2>/dev/null; do
+            sleep 5 &
+            wait $! 2>/dev/null
+            rotate
+        done
+        wait "${child}" 2>/dev/null
+        rc=$?
+        child=""
+        rm -f "${DIR}/child.pid"
+        ran=$((SECONDS - start_ts))
+        if [ "${ran}" -ge 60 ]; then
+            backoff=${MIN_BACKOFF}
+        else
+            backoff=$((backoff * 2))
+            [ "${backoff}" -gt "${MAX_BACKOFF}" ] && backoff=${MAX_BACKOFF}
+        fi
+        echo "[$(stamp)] exited rc=${rc} after ${ran}s, restarting in ${backoff}s" >> "${LOG}"
+        sleep "${backoff}" &
+        wait $! 2>/dev/null
+    done
+}
+
+start() {
+    load "$1"
+    if pid_alive "${DIR}/supervisor.pid"; then
+        echo "${NAME}: already running"
+        return 0
+    fi
+    local miss
+    miss="$(missing_requirements)"
+    [ -z "${miss}" ] || { say "${NAME} 缺少：$(echo "${miss}" | tr '\n' ' ')"; return 1; }
+    mkdir -p "${DIR}"
+    chmod 700 "${STATE_ROOT}" "${DIR}" 2>/dev/null || true
+    setsid -f bash "${SELF}" _supervise "${NAME}" < /dev/null > /dev/null 2>&1
+    local i
+    for ((i = 0; i < 20; i++)); do
+        pid_alive "${DIR}/child.pid" && break
+        sleep 0.25
+    done
+    if pid_alive "${DIR}/supervisor.pid"; then
+        echo "${NAME}: started (log ${LOG})"
+    else
+        say "${NAME} 没起来，看 ${LOG}"
+        return 1
+    fi
+}
+
+stop() {
+    load "$1"
+    if ! pid_alive "${DIR}/supervisor.pid"; then
+        echo "${NAME}: not running"
+        rm -f "${DIR}/supervisor.pid" "${DIR}/child.pid"
+        return 0
+    fi
+    local sup i
+    sup="$(cat "${DIR}/supervisor.pid")"
+    kill -TERM "${sup}" 2>/dev/null
+    for ((i = 0; i < (STOP_GRACE + 5) * 4; i++)); do
+        kill -0 "${sup}" 2>/dev/null || break
+        sleep 0.25
+    done
+    if kill -0 "${sup}" 2>/dev/null; then
+        say "${NAME} 的保活循环 ${STOP_GRACE}s 内没退出，强杀"
+        kill -KILL "${sup}" 2>/dev/null
+        pid_alive "${DIR}/child.pid" && kill -KILL "$(cat "${DIR}/child.pid")" 2>/dev/null
+        rm -f "${DIR}/supervisor.pid" "${DIR}/child.pid"
+    fi
+    echo "${NAME}: stopped"
+}
+
+status_one() {
+    load "$1"
+    if pid_alive "${DIR}/supervisor.pid"; then
+        if pid_alive "${DIR}/child.pid"; then
+            local c
+            c="$(cat "${DIR}/child.pid")"
+            echo "${NAME}: running (pid ${c}, up $(ps -o etime= -p "${c}" | tr -d ' '))"
+        else
+            echo "${NAME}: restarting (backoff; see ${LOG})"
+        fi
+    else
+        local miss
+        miss="$(missing_requirements)"
+        if [ -n "${miss}" ]; then
+            echo "${NAME}: not configured (missing $(echo "${miss}" | tr '\n' ' '))"
+        else
+            echo "${NAME}: stopped"
+        fi
+    fi
+}
+
+cmd="${1:-status}"
+[ "$#" -eq 0 ] || shift
+[ "$(id -u)" != 0 ] || die "别用 root 跑：runuser -u user -- ua-service ${cmd} $*"
+
+case "${cmd}" in
+    start) start "${1:-}" ;;
+    stop) stop "${1:-}" ;;
+    restart) stop "${1:-}" && start "${1:-}" ;;
+    status)
+        if [ -n "${1:-}" ]; then
+            status_one "$1"
+        else
+            for n in $(names); do (status_one "${n}"); done
+        fi
+        ;;
+    logs)
+        load "${1:-}"
+        if [ "${2:-}" = -f ]; then exec tail -n 50 -F "${LOG}"; fi
+        tail -n 50 "${LOG}"
+        ;;
+    start-all)
+        rc=0
+        for n in $(names); do
+            (
+                load "${n}"
+                if [ -n "$(missing_requirements)" ]; then
+                    echo "${n}: skipped (not configured)"
+                else
+                    start "${n}"
+                fi
+            ) || rc=1
+        done
+        exit "${rc}"
+        ;;
+    _supervise)
+        load "${1:-}"
+        supervise
+        ;;
+    -h|--help|help)
+        awk 'NR>1{if($0 !~ /^#/) exit; sub(/^# ?/,""); print}' "$0"
+        ;;
+    *)
+        die "不认识的命令：${cmd}（start / stop / restart / status / logs / start-all）"
+        ;;
+esac

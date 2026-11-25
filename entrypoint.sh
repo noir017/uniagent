@@ -128,6 +128,13 @@ start_fleetherd() {
         echo "[entrypoint] !! ua-tools sync 有失败，见 ${UA_ROOT}/sync.log（主进程不受影响）" >&2
     fi
     start_fleetherd
+    # 常驻服务（runabout 等，定义在 /usr/local/lib/ua-service/）：接在 sync 后面，因为二进制是
+    # ua-tools 装的。没配置的服务跳过；起不来只告警，保活和日志见 `ua-service status / logs`。
+    if [ -x /usr/local/bin/ua-service ]; then
+        /usr/sbin/runuser -u "${USERNAME}" -- env HOME="${HOME_DIR}" \
+            /usr/local/bin/ua-service start-all \
+            || echo "[entrypoint] !! ua-service start-all 有失败（主进程不受影响）" >&2
+    fi
 ) &
 echo "[entrypoint] ua-tools sync 已在后台开始（日志 ${UA_ROOT}/sync.log，进度 ua-tools list）"
 

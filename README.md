@@ -16,6 +16,7 @@
 | Teleport | `tsh`、`teleport` | apt 源 `stable/v18`，**钉 18.10.0**（不能比集群 auth 新）。tsh 连别的节点用；容器本身是 agentless 节点，teleport 默认不跑，留着回滚到 agent 模式。tctl / tbot / teleport-update 构建时删掉（省 259 MB） |
 | agyacct | `agyacct` | agy 的多 Google 账号切换器（本仓库 `bin/agyacct`）。见「agy 多账号切换」一节 |
 | ua-tools | `ua-tools` | 可选工具的安装器（本仓库 `bin/ua-tools` + `agents/*.sh`），见下 |
+| ua-service | `ua-service` | 常驻服务的保活器（本仓库 `bin/ua-service` + `services/*.sh`），见「常驻服务」 |
 | 其他 | git、python3、build-essential、jq、ripgrep、fd、tmux、htop、gh、ttyd… | |
 
 **可选工具（`/opt/ua`）**
@@ -28,11 +29,12 @@
 | `agy` | `agy` | 自更新 | 官方安装脚本。agy 在后台自己更新，装在持久卷里以后重建也不丢 |
 | `fleetherd` | `fleetherd`、`talkcode`（别名）、`claude-agent-acp` | 钉（`FLEETHERD_VERSION`） | IM 网关，GitHub Release 的 tarball 并校验 SHA256。见「IM 网关」一节 |
 | `go` | `go`、`gofmt` | 钉（`GO_VERSION`） | 官方 tarball |
+| `runabout` | `runabout` | latest | 网页端 agent 的 MCP 工具服务，GitHub Release 的二进制并按 `SHA256SUMS` 校验。不在默认清单里，要跑的机器手动 `ua-tools install runabout`。见「常驻服务」 |
 
 ```bash
 ua-tools list                 # 已装版本 / 钉的版本 / 是否在默认清单
 ua-tools install go           # 装（不在默认清单里也行）
-ua-tools update               # latest 类追到最新（opencode、codex，本地构建的 claude）
+ua-tools update               # latest 类追到最新（opencode、codex、runabout，本地构建的 claude）
 ua-tools remove codex         # 删
 ```
 
@@ -242,6 +244,34 @@ docker compose pull && docker compose up -d
 镜像重建不会影响 `~/apps/uniagent/home` 里的数据。首次启动时 entrypoint 会把镜像里的 home
 骨架（`.bashrc`、`.local/bin`、`workspace`）补进空的挂载目录，已存在的文件不会被覆盖。
 IM 网关会由 entrypoint 自动拉起，重建后**不需要任何手工补动作**。
+
+## 常驻服务（ua-service）
+
+容器的主进程是 sshd，没有 systemd。要常驻的服务各写一个定义文件放 `services/<名字>.sh`
+（进镜像的 `/usr/local/lib/ua-service/`），由 `ua-service` 保活：退出就重启，跑不满 60 秒按 5→300 秒退避；
+日志在 `~/.local/state/ua-service/<名字>/log`，超过 20 MB 轮转一份。entrypoint 在 `ua-tools sync` 之后
+跑 `ua-service start-all`，前置文件（配置、二进制）不全的服务直接跳过，所以没配置的机器什么也不会起。
+
+```bash
+ua-service status                 # 全部服务
+ua-service restart runabout       # 换了二进制或改了配置后
+ua-service logs runabout -f
+```
+
+### runabout
+
+给 Gemini / ChatGPT / Claude.ai 网页端用的 MCP 工具服务（[noir017/runabout](https://github.com/noir017/runabout)）。
+装在这里而不是单独的容器，是为了让它对本机的操作**直接执行**：以前经 ssh + Teleport 进来，并发一高就撞
+sshd 的 MaxSessions、证书到期断主连接、Teleport 副 proxy 到 auth 的跨境链路卡住（2026-11-25 排查）。
+
+- 二进制：`ua-tools install runabout`；升级 `ua-tools update runabout && ua-service restart runabout`，不用重建容器。
+- 配置：`~/.config/runabout/config.yaml`，机密（`RB_BASE_URL`、上游令牌）在同目录 `.env`（600）。
+  `fleet.local_name` 设成这台机器的名字（`uniagent`），客户端原来写的 `target` 不用改；去别的机器走本容器的
+  ssh 短名和 Teleport（审批由 `tp-grant-active` 发起）。OAuth 登记和审计日志在 `server.data_dir`。
+- 入口：runabout 听 `0.0.0.0:8484`，宿主的 cloudflared 经共享网络 `cloudflared`（容器别名 `runabout`）把
+  公网域名转进来。compose 里要把容器挂进这个网络；不想重建就先 `docker network connect --alias runabout cloudflared uniagent`。
+- 安全：runabout 的 shell 就是 user，和以前经 ssh 进来的权限一样；但它的令牌也在 user 的家目录里，本机所有
+  agent 用 shell 都读得到（文件工具已拉黑这个目录，shell 挡不住）。
 
 ## IM 网关（fleetherd）
 

@@ -235,6 +235,14 @@ RUN printf '%s\n' \
 COPY bin/fleetherd-daemon.sh /usr/local/bin/fleetherd-daemon.sh
 RUN chmod +x /usr/local/bin/fleetherd-daemon.sh
 
+# 常驻服务的保活器（容器里没有 systemd）：服务定义在 services/，entrypoint 在 ua-tools sync 之后
+# `ua-service start-all`，没配置的服务自动跳过。见 bin/ua-service 开头。
+COPY bin/ua-service /usr/local/bin/ua-service
+COPY services/ /usr/local/lib/ua-service/
+RUN chmod 755 /usr/local/bin/ua-service \
+    && bash -n /usr/local/bin/ua-service \
+    && for f in /usr/local/lib/ua-service/*.sh; do bash -n "$f"; done
+
 # recall MCP 服务（见 mcp/README.md）。放进镜像而不是 /home/user，是因为它是代码不是配置：
 # 镜像更新就一起更新，不会在某台机器上悄悄留个旧版本。指向它的注册项仍在 /home/user 下
 # 各 agent 自己的配置里——那是持久卷，重建镜像不受影响。

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ua-tools —— 可选工具（各 coding agent + Go）的安装器。
+# ua-tools —— 可选工具（各 coding agent、Go、runabout）的安装器。
 #
 # 镜像里只有这个脚本、agents/*.sh 和版本钉子（pins.env），工具本体装在持久卷里：
 #   /opt/ua/<工具>/<版本>/   一个版本一个目录（npm 的 --prefix），装完才写 .ok
@@ -23,7 +23,8 @@
 # 版本分两种：
 #   钉死（fleetherd、go，以及 CI 构建时的 claude）：版本写在镜像里，sync 让它和镜像一致，
 #     换镜像 = 换版本，和以前一样；update 不动它们。
-#   latest（opencode、codex，本地构建的 claude）：装上以后只在 update 时升级。
+#   latest（opencode、codex、runabout，本地构建的 claude）：装上以后只在 update 时升级。
+#     runabout 追的是 GitHub 上最新的 Release，升级后要 `ua-service restart runabout` 才换进程。
 #   agy 例外：它会在后台自己更新，update 不管它。
 set -euo pipefail
 
@@ -31,7 +32,7 @@ UA_ROOT="${UA_ROOT:-/opt/ua}"
 UA_LIB="${UA_LIB:-/usr/local/lib/ua-tools}"
 UA_PINS="${UA_PINS:-/usr/local/share/ua-tools/pins.env}"
 # 顺序就是安装顺序：claude 必须在 fleetherd 前面（见 agents/fleetherd.sh）。
-ALL_TOOLS="opencode claude codex agy fleetherd go"
+ALL_TOOLS="opencode claude codex agy fleetherd go runabout"
 
 say() { printf 'ua-tools: %s\n' "$*" >&2; }
 die() { say "$*"; exit 1; }
@@ -57,6 +58,7 @@ bins_of() {
         agy)      echo "agy=bin/agy" ;;
         fleetherd) echo "fleetherd=bin/fleetherd talkcode=bin/talkcode claude-agent-acp=lib/node_modules/fleetherd/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js" ;;
         go)       echo "go=bin/go gofmt=bin/gofmt" ;;
+        runabout) echo "runabout=bin/runabout" ;;
     esac
 }
 
@@ -101,6 +103,12 @@ current_of() {
     if [ -f "${UA_ROOT}/$1/${v}/.ok" ]; then echo "${v}"; fi
 }
 
+# GitHub 仓库最新 Release 的版本号（去掉 tag 的 v）。
+gh_latest() {
+    curl -fsSL "https://api.github.com/repos/$1/releases/latest" 2>/dev/null \
+        | jq -r '.tag_name // empty' | sed 's/^v//'
+}
+
 # 范围内最高的版本。`npm view --json` 有时输出字符串、有时输出数组（npm 12 对单个版本也给数组）。
 npm_max() {
     npm view "$1" version --json 2>/dev/null \
@@ -112,6 +120,7 @@ resolve_latest() {
     case "$1" in
         opencode) npm_max "@opencode/cli@latest" ;;
         claude)   npm_max "@anthropic-ai/claude-code@latest" ;;
+        runabout) gh_latest noir017/runabout ;;
         codex)
             # codex 的版本不是挑的，是 codex-acp 声明的依赖范围里最高的那个：对不上的话
             # codex-acp 会在自己的 node_modules 里再嵌一份 codex（见 agents/codex.sh）。
@@ -189,7 +198,7 @@ ensure() {
         [ "${cur}" = "${pin}" ] || install_version "${t}" "${pin}"
     elif [ -z "${cur}" ]; then
         v="$(resolve_latest "${t}")"
-        [ -n "${v}" ] || { say "!! 查不到 ${t} 的最新版本（npm registry 不通？）"; return 1; }
+        [ -n "${v}" ] || { say "!! 查不到 ${t} 的最新版本（npm registry / GitHub 不通？）"; return 1; }
         install_version "${t}" "${v}"
     fi
 }
@@ -204,7 +213,7 @@ upgrade() {
         *)      say "${t}：钉在镜像里（${pin}），随镜像更新"; return 0 ;;
     esac
     v="$(resolve_latest "${t}")"
-    [ -n "${v}" ] || { say "!! 查不到 ${t} 的最新版本（npm registry 不通？）"; return 1; }
+    [ -n "${v}" ] || { say "!! 查不到 ${t} 的最新版本（npm registry / GitHub 不通？）"; return 1; }
     if [ "${v}" = "${cur}" ]; then
         say "${t}：已是最新（${v}）"
     else
